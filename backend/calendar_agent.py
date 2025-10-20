@@ -1,0 +1,114 @@
+"""
+Enhanced Calendar Agent with coordination capabilities
+"""
+import json
+import os
+from typing import Dict, Any, List
+from openai import OpenAI
+
+from .mock_graph_api import EnhancedMockGraphAPI
+
+
+class EnhancedCalendarAgent:
+    def __init__(self):
+        self.llm = OpenAI(
+            api_key=os.environ.get('OPENAI_API_KEY')
+        )
+        self.system_message = "You are an enhanced Calendar Agent with coordination capabilities. Schedule meetings, manage attendees, and collaborate with email and notes agents."
+        self.model = "gpt-4"
+
+    async def process_request(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Process calendar requests with enhanced collaboration"""
+        user_message = state["user_request"]
+        context = state.get("context", {})
+
+        # Check if this is from email agent collaboration
+        email_context = context.get("email_agent", {})
+
+        if email_context.get("meeting_required"):
+            # Process meeting from email collaboration
+            meeting_details = email_context.get("meeting_details", {})
+
+            result = await EnhancedMockGraphAPI.create_calendar_event_with_attendees(
+                title=meeting_details.get("title", "Collaborative Meeting"),
+                start_date="2024-01-16T14:00:00Z",  # Smart scheduling logic would go here
+                end_date="2024-01-16T15:00:00Z",
+                description=meeting_details.get("agenda", "Meeting scheduled via agent collaboration"),
+                attendees=[email_context.get("email_to")]
+            )
+
+            return {
+                "status": "success",
+                "result": result,
+                "message": f"📅 Meeting '{result['title']}' scheduled with enhanced features",
+                "collaboration_data": {
+                    "meeting_link": result["meeting_link"],
+                    "attendees_notified": result["notifications_sent"],
+                    "event_id": result["id"]
+                }
+            }
+
+        # Regular calendar processing with AI enhancement
+        extraction_prompt = f"""
+        Extract meeting details from: '{user_message}'
+        Context: {context}
+
+        Return JSON with:
+        {{
+            "action": "create/view",
+            "event_details": {{"title": "title", "start_date": "ISO date", "end_date": "ISO date", "description": "desc"}},
+            "attendees": ["email1", "email2"],
+            "collaboration_needed": ["agent_names"]
+        }}
+        """
+
+        response = self.llm.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": self.system_message},
+                {"role": "user", "content": extraction_prompt}
+            ]
+        )
+        response_text = response.choices[0].message.content
+
+        try:
+            parsed_response = json.loads(response_text)
+
+            if parsed_response.get("action") == "create":
+                event_details = parsed_response.get("event_details", {})
+                attendees = parsed_response.get("attendees", [])
+
+                result = await EnhancedMockGraphAPI.create_calendar_event_with_attendees(
+                    title=event_details.get("title", "New Meeting"),
+                    start_date=event_details.get("start_date", "2024-01-16T10:00:00Z"),
+                    end_date=event_details.get("end_date", "2024-01-16T11:00:00Z"),
+                    description=event_details.get("description", ""),
+                    attendees=attendees
+                )
+
+                return {
+                    "status": "success",
+                    "result": result,
+                    "message": f"📅 Enhanced meeting '{result['title']}' created with {len(attendees)} attendees",
+                    "collaboration_data": {
+                        "meeting_link": result["meeting_link"],
+                        "event_id": result["id"],
+                        "next_agents": parsed_response.get("collaboration_needed", [])
+                    }
+                }
+            else:
+                # View calendar functionality
+                events = await EnhancedMockGraphAPI.get_calendar_events()
+                return {
+                    "status": "success",
+                    "result": {"events": events},
+                    "message": "📅 Your enhanced calendar view with smart insights",
+                    "collaboration_data": {}
+                }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"❌ Error in enhanced calendar processing: {str(e)}",
+                "collaboration_data": {}
+            }
