@@ -34,6 +34,7 @@ class GoogleOAuthConfig:
         "profile", 
         "email",
         "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.readonly",
         "https://www.googleapis.com/auth/calendar",
         "https://www.googleapis.com/auth/drive.readonly"
     ]
@@ -392,3 +393,62 @@ class GoogleAPIClient:
                 'description': description,
                 'status': 'created'
             }
+    
+    async def list_emails(self, max_results: int = 10) -> list:
+        """Read emails from Gmail inbox"""
+        try:
+            from googleapiclient.discovery import build
+            from google.oauth2.credentials import Credentials
+            import base64
+            
+            creds = Credentials(token=self.access_token)
+            service = build('gmail', 'v1', credentials=creds)
+            
+            # List messages from inbox
+            results = service.users().messages().list(
+                userId='me', 
+                maxResults=max_results,
+                labelIds=['INBOX']
+            ).execute()
+            
+            messages = results.get('messages', [])
+            emails = []
+            
+            for msg in messages:
+                # Get full message details
+                msg_data = service.users().messages().get(
+                    userId='me', 
+                    id=msg['id'],
+                    format='full'
+                ).execute()
+                
+                # Parse headers
+                headers = {h['name']: h['value'] for h in msg_data['payload']['headers']}
+                
+                # Extract body (simplified - gets text/plain part)
+                body = ""
+                if 'parts' in msg_data['payload']:
+                    for part in msg_data['payload']['parts']:
+                        if part['mimeType'] == 'text/plain':
+                            if 'data' in part['body']:
+                                body = base64.urlsafe_b64decode(part['body']['data']).decode('utf-8', errors='ignore')
+                            break
+                else:
+                    if 'data' in msg_data['payload']['body']:
+                        body = base64.urlsafe_b64decode(msg_data['payload']['body']['data']).decode('utf-8', errors='ignore')
+                
+                emails.append({
+                    'id': msg['id'],
+                    'thread_id': msg['threadId'],
+                    'from': headers.get('From', ''),
+                    'to': headers.get('To', ''),
+                    'subject': headers.get('Subject', ''),
+                    'date': headers.get('Date', ''),
+                    'snippet': msg_data.get('snippet', ''),
+                    'body': body[:1000] + '...' if len(body) > 1000 else body  # Truncate long bodies
+                })
+            
+            return emails
+            
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to read emails: {str(e)}")

@@ -7,7 +7,6 @@ from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 
-from email_agent import SecureEmailAgent
 from calendar_agent import EnhancedCalendarAgent
 from notes_agent import EnhancedNotesAgent
 from file_summarizer_agent import EnhancedFileSummarizerAgent
@@ -22,6 +21,7 @@ class OrchestratorState(TypedDict):
     """State for the dynamic orchestrator"""
     user_request: str
     session_id: str
+    access_token: Optional[str]
     file_content: Optional[str]
     conversation_history: List[Dict[str, Any]]
     analysis_result: Dict[str, Any]
@@ -41,7 +41,6 @@ class DynamicMultiAgentOrchestrator:
             api_key=AZURE_OPENAI_API_KEY,
             temperature=0.1
         )
-        self.email_agent = SecureEmailAgent()
         self.calendar_agent = EnhancedCalendarAgent()
         self.notes_agent = EnhancedNotesAgent()
         self.file_agent = EnhancedFileSummarizerAgent()
@@ -56,7 +55,6 @@ class DynamicMultiAgentOrchestrator:
         # Add nodes
         workflow.add_node("analyze_request", self._analyze_request)
         workflow.add_node("route_agents", self._route_agents)
-        workflow.add_node("execute_email_agent", self._execute_email_agent)
         workflow.add_node("execute_calendar_agent", self._execute_calendar_agent)
         workflow.add_node("execute_notes_agent", self._execute_notes_agent)
         workflow.add_node("execute_file_agent", self._execute_file_agent)
@@ -71,15 +69,6 @@ class DynamicMultiAgentOrchestrator:
         # Conditional routing based on agents to invoke
         workflow.add_conditional_edges(
             "route_agents",
-            self._should_execute_email,
-            {
-                True: "execute_email_agent",
-                False: "compile_response"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "execute_email_agent",
             self._should_execute_calendar,
             {
                 True: "execute_calendar_agent",
@@ -130,7 +119,6 @@ class DynamicMultiAgentOrchestrator:
         analysis_prompt = ChatPromptTemplate.from_template("""
         You are an expert AI orchestrator. Analyze this user request and determine which agents should be invoked
         and in what order. Available agents:
-        - email_agent: For sending emails, creating invites, email-related tasks
         - calendar_agent: For scheduling meetings, calendar management, time coordination
         - notes_agent: For taking notes, saving information, note management
         - file_agent: For analyzing documents, summarizing files, content extraction
@@ -171,10 +159,6 @@ class DynamicMultiAgentOrchestrator:
             state["workflow_complete"] = True
         return state
 
-    def _should_execute_email(self, state: OrchestratorState) -> bool:
-        """Check if email agent should be executed"""
-        return "email_agent" in state["agents_to_invoke"] and state["current_agent"] == "email_agent"
-
     def _should_execute_calendar(self, state: OrchestratorState) -> bool:
         """Check if calendar agent should be executed"""
         return "calendar_agent" in state["agents_to_invoke"] and state["current_agent"] == "calendar_agent"
@@ -186,28 +170,6 @@ class DynamicMultiAgentOrchestrator:
     def _should_execute_file(self, state: OrchestratorState) -> bool:
         """Check if file agent should be executed"""
         return "file_agent" in state["agents_to_invoke"] and state["current_agent"] == "file_agent"
-
-    async def _execute_email_agent(self, state: OrchestratorState) -> OrchestratorState:
-        """Execute the email agent"""
-        logging.info("Executing email agent")
-        agent_state = {
-            "user_request": state["user_request"],
-            "context": state.get("agent_results", {}),
-            "conversation_history": state.get("conversation_history", []),
-            "results": {}
-        }
-
-        result = await self.email_agent.process_request(agent_state)
-        state["agent_results"]["email_agent"] = result
-
-        # Move to next agent
-        current_index = state["agents_to_invoke"].index("email_agent")
-        if current_index + 1 < len(state["agents_to_invoke"]):
-            state["current_agent"] = state["agents_to_invoke"][current_index + 1]
-        else:
-            state["workflow_complete"] = True
-
-        return state
 
     async def _execute_calendar_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the calendar agent"""
@@ -304,7 +266,7 @@ class DynamicMultiAgentOrchestrator:
         state["final_response"] = response.content
         return state
 
-    async def process_request(self, user_request: str, session_id: str, file_content: str = None) -> Dict[str, Any]:
+    async def process_request(self, user_request: str, session_id: str, access_token: str = None, file_content: str = None) -> Dict[str, Any]:
         """Process user request through the dynamic LangGraph orchestrator"""
         logging.info(f"Processing request: '{user_request}' for session {session_id}")
 
@@ -313,6 +275,7 @@ class DynamicMultiAgentOrchestrator:
             initial_state: OrchestratorState = {
                 "user_request": user_request,
                 "session_id": session_id,
+                "access_token": access_token,
                 "file_content": file_content,
                 "conversation_history": [],
                 "analysis_result": {},
@@ -320,6 +283,7 @@ class DynamicMultiAgentOrchestrator:
                 "final_response": "",
                 "agents_to_invoke": [],
                 "current_agent": "",
+                "email_action": None,
                 "workflow_complete": False
             }
 

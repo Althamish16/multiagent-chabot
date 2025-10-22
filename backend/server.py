@@ -199,7 +199,6 @@ def format_response_as_html(text: str, agent_type: str = "general") -> str:
 
     # Add agent-specific styling
     agent_colors = {
-        "email_agent": "#007bff",
         "calendar_agent": "#28a745",
         "notes_agent": "#ffc107",
         "file_summarizer_agent": "#dc3545",
@@ -282,69 +281,6 @@ async def stream_llm_response(message: str, session_id: str, agent_type: str = "
 # Removed MockGraphAPI - using Google APIs instead
 
 # Specialized Agents
-class EmailAgent:
-    def __init__(self):
-        # Import the secure email agent
-        try:
-            from .email_agent import SecureEmailAgent
-            self.agent = SecureEmailAgent()
-        except ImportError:
-            # Fallback to mock if secure agent not available
-            self.agent = None
-
-    async def process_request(self, user_message: str, parameters: Dict[str, Any], access_token: str = None):
-        if not self.agent:
-            return "❌ Email agent not available"
-
-        action = parameters.get('action', 'draft')
-        
-        if action == 'approve_send':
-            # Send the pending draft
-            if access_token:
-                return await self.approve_and_send(access_token)
-            else:
-                return "❌ No access token available. Please sign in with Google to send emails."
-        elif action == 'cancel':
-            # Cancel the pending draft
-            self.pending_draft = None
-            return "📧 Email draft cancelled."
-        else:
-            # Draft new email
-            state = {
-                "user_request": user_message,
-                "action": "draft",
-                "context": parameters.get('context', {}),
-                "draft": parameters.get('draft'),
-                "access_token": access_token
-            }
-
-            result = await self.agent.process_request(state)
-
-            if result.get("requires_approval"):
-                # Store draft for later approval
-                self.pending_draft = result.get("draft")
-                return result["message"] + "\n\nReply with 'yes' to send this email or 'no' to cancel."
-
-            return result.get("message", "Email processed")
-
-    async def approve_and_send(self, access_token: str):
-        """Send the pending draft after approval"""
-        if not hasattr(self, 'pending_draft') or not self.pending_draft:
-            return "❌ No pending email draft to send"
-
-        state = {
-            "action": "send",
-            "draft": self.pending_draft,
-            "access_token": access_token
-        }
-
-        result = await self.agent.process_request(state)
-
-        # Clear pending draft
-        self.pending_draft = None
-
-        return result.get("message", "Email sent")
-
 class CalendarAgent:
     def __init__(self):
         try:
@@ -485,14 +421,12 @@ class NotesAgent:
         return "📝 Note functionality ready. Tell me what you'd like to remember!"
 
 # Legacy agents for backward compatibility
-email_agent = EmailAgent()
 calendar_agent = CalendarAgent()
 file_summarizer_agent = FileSummarizerAgent()
 notes_agent = NotesAgent()
 
 # Agent registry for scalable processing
 agents = {
-    'email_agent': email_agent,
     'calendar_agent': calendar_agent,
     'file_summarizer_agent': file_summarizer_agent,
     'notes_agent': notes_agent
@@ -512,7 +446,7 @@ async def process_agent_request(agent_name: str, user_message: str, parameters: 
             logging.error(f"Error processing {agent_name} request: {str(e)}")
             raise RuntimeError(f"❌ Error processing {agent_name.replace('_', ' ')} request: {str(e)}")
     elif agent_name == 'general':
-        return "🤖 Hello! I'm your AI Agents assistant. I can help you with:\n\n📧 **Email** - Send emails to anyone\n📅 **Calendar** - Manage your schedule and events\n📄 **File Summarization** - Analyze and summarize documents\n📝 **Notes** - Take and organize your notes\n\n💡 **Try saying:**\n• \"Send an email to john@company.com about the meeting\"\n• \"What's on my calendar today?\"\n• \"Take a note about project deadlines\"\n• Upload a document for analysis\n\nWhat would you like to do?"
+        return "🤖 Hello! I'm your AI Agents assistant. I can help you with:\n\n **Calendar** - Manage your schedule and events\n📄 **File Summarization** - Analyze and summarize documents\n📝 **Notes** - Take and organize your notes\n\n💡 **Try saying:**\n• \"What's on my calendar today?\"\n• \"Take a note about project deadlines\"\n• Upload a document for analysis\n\nWhat would you like to do?"
     else:
         raise RuntimeError(f"❌ Unknown agent: {agent_name}")
 
@@ -524,16 +458,8 @@ class AgentOrchestrator:
         
         message_lower = user_message.lower().strip()
         
-        # Handle email approval responses
-        if message_lower in ['yes', 'y', 'approve', 'send', 'confirm']:
-            return {'agent': 'email_agent', 'action': 'approve_send', 'parameters': {}}
-        elif message_lower in ['no', 'n', 'cancel', 'reject']:
-            return {'agent': 'email_agent', 'action': 'cancel', 'parameters': {}}
-        
         # Simple keyword-based routing with AI fallback
-        if any(word in message_lower for word in ['email', 'send', 'mail', 'message']):
-            return {'agent': 'email_agent', 'action': 'send_email', 'parameters': {}}
-        elif any(word in message_lower for word in ['calendar', 'meeting', 'schedule', 'event', 'appointment']):
+        if any(word in message_lower for word in ['calendar', 'meeting', 'schedule', 'event', 'appointment']):
             return {'agent': 'calendar_agent', 'action': 'manage_calendar', 'parameters': {}}
         elif any(word in message_lower for word in ['note', 'remember', 'save', 'write down']):
             return {'agent': 'notes_agent', 'action': 'create_note', 'parameters': {}}
@@ -549,7 +475,7 @@ class AgentOrchestrator:
                     api_version=AZURE_OPENAI_API_VERSION,
                     deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
                     session_id="routing_orchestrator",  # Use a generic session for routing
-                    system_message="You are an AI Agent Orchestrator. Analyze user requests and determine which specialized agent should handle the task: email_agent, calendar_agent, file_summarizer_agent, or notes_agent. Respond with JSON format: {'agent': 'agent_name', 'action': 'action_description', 'parameters': {...}}"
+                    system_message="You are an AI Agent Orchestrator. Analyze user requests and determine which specialized agent should handle the task: calendar_agent, file_summarizer_agent, or notes_agent. Respond with JSON format: {'agent': 'agent_name', 'action': 'action_description', 'parameters': {...}}"
                 )
                 user_msg = UserMessage(text=f"Route this request to appropriate agent: {user_message}")
                 response = await session_llm_chat.send_message(user_msg)
@@ -576,7 +502,7 @@ async def root():
             "ready": HAS_GOOGLE_CONFIG and HAS_LLM_KEYS
         },
         "features": {
-            "agents": ["email_agent", "calendar_agent", "file_summarizer_agent", "notes_agent"],
+            "agents": ["calendar_agent", "file_summarizer_agent", "notes_agent"],
             "collaboration": ["multi_agent_workflows"] if enhanced_orchestrator else ["basic_routing"],
             "authentication": ["google_oauth"] if google_auth else ["not_configured"],
             "file_processing": ["pdf", "docx", "txt", "md"]
@@ -614,10 +540,31 @@ async def enhanced_chat_with_agents(
         await save_message(user_message_doc)
         
         logging.info("Processing with enhanced orchestrator")
+        
+        # Get Google access token for the user
+        access_token = None
+        try:
+            # Extract token from Authorization header
+            auth_header = request.headers.get("Authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                token = auth_header.split(" ")[1]
+                # Get Google token from session
+                from auth_new import session_store, GoogleAuth
+                auth = GoogleAuth()
+                payload = auth.verify_jwt_token(token)
+                session_id = payload.get('session_id')
+                if session_id:
+                    session = session_store.get(session_id)
+                    if session:
+                        access_token = session.get('google_access_token')
+        except Exception as e:
+            logging.warning(f"Could not get Google access token: {e}")
+        
         # Process with enhanced orchestrator
         result = await enhanced_orchestrator.process_request(
             user_request=chat_input.message,
-            session_id=chat_input.session_id
+            session_id=chat_input.session_id,
+            access_token=access_token
         )
 
         # Validate result structure

@@ -186,10 +186,13 @@ Ready to assist! 🤖`
       // Use enhanced endpoint for authenticated users
       const endpoint = isAuthenticated ? '/enhanced-chat' : '/chat';
       
+      const token = localStorage.getItem('auth_token');
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+      
       const response = await axios.post(`${API}${endpoint}`, {
         message: originalMessage,
         session_id: sessionId
-      });
+      }, { headers });
 
       const agentUsed = response.data.agent_used;
       const workflowType = response.data.workflow_type;
@@ -205,7 +208,6 @@ Ready to assist! 🤖`
         await new Promise(resolve => setTimeout(resolve, 1200));
       } else {
         const agentNames = {
-          'email_agent': '📧 Email Agent',
           'calendar_agent': '📅 Calendar Agent', 
           'file_summarizer_agent': '📄 File Summarizer Agent',
           'notes_agent': '📝 Notes Agent',
@@ -287,8 +289,15 @@ Ready to assist! 🤖`
 
       // Use appropriate upload endpoint based on authentication
       const endpoint = isAuthenticated ? '/upload' : '/upload-legacy';
+      
+      const token = localStorage.getItem('auth_token');
+      const headers = {
+        "Content-Type": "multipart/form-data",
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+      };
+      
       const response = await axios.post(`${API}${endpoint}`, formData, {
-        headers: { "Content-Type": "multipart/form-data" }
+        headers
       });
 
       const summaryMessage = {
@@ -326,7 +335,6 @@ Ready to assist! 🤖`
 
   const getAgentIcon = (agentType) => {
     switch (agentType) {
-      case "email_agent": return <Mail className="w-4 h-4" />;
       case "calendar_agent": return <Calendar className="w-4 h-4" />;
       case "file_summarizer_agent": return <FileText className="w-4 h-4" />;
       case "notes_agent": return <StickyNote className="w-4 h-4" />;
@@ -338,7 +346,6 @@ Ready to assist! 🤖`
 
   const getAgentColor = (agentType) => {
     switch (agentType) {
-      case "email_agent": return "bg-blue-500";
       case "calendar_agent": return "bg-green-500";
       case "file_summarizer_agent": return "bg-purple-500";
       case "notes_agent": return "bg-orange-500";
@@ -350,7 +357,6 @@ Ready to assist! 🤖`
 
   const getAgentName = (agentType) => {
     switch (agentType) {
-      case "email_agent": return "📧 Email Agent";
       case "calendar_agent": return "📅 Calendar Agent";
       case "file_summarizer_agent": return "📄 File Summarizer Agent";
       case "notes_agent": return "📝 Notes Agent";
@@ -361,9 +367,8 @@ Ready to assist! 🤖`
   };
 
   const enhancedQuickActions = [
-    { text: "Schedule a meeting with the team and send invites", icon: <Workflow className="w-4 h-4" />, enhanced: true },
     { text: "Analyze this document and save key insights to my notes", icon: <Zap className="w-4 h-4" />, enhanced: true },
-    { text: "Send project update email and schedule follow-up meeting", icon: <Users className="w-4 h-4" />, enhanced: true },
+    { text: "Schedule a team meeting and create meeting notes", icon: <Users className="w-4 h-4" />, enhanced: true },
     { text: "Create comprehensive meeting notes with action items", icon: <Crown className="w-4 h-4" />, enhanced: true }
   ];
 

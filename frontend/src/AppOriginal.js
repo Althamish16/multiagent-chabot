@@ -111,7 +111,6 @@ function App() {
       
       // Show agent-specific processing
       const agentNames = {
-        'email_agent': '📧 Email Agent',
         'calendar_agent': '📅 Calendar Agent', 
         'file_summarizer_agent': '📄 File Summarizer Agent',
         'notes_agent': '📝 Notes Agent',
@@ -209,7 +208,6 @@ function App() {
 
   const getAgentIcon = (agentType) => {
     switch (agentType) {
-      case "email_agent": return <Mail className="w-4 h-4" />;
       case "calendar_agent": return <Calendar className="w-4 h-4" />;
       case "file_summarizer_agent": return <FileText className="w-4 h-4" />;
       case "notes_agent": return <StickyNote className="w-4 h-4" />;
@@ -219,7 +217,6 @@ function App() {
 
   const getAgentColor = (agentType) => {
     switch (agentType) {
-      case "email_agent": return "bg-blue-500";
       case "calendar_agent": return "bg-green-500";
       case "file_summarizer_agent": return "bg-purple-500";
       case "notes_agent": return "bg-orange-500";
@@ -229,7 +226,6 @@ function App() {
 
   const getAgentName = (agentType) => {
     switch (agentType) {
-      case "email_agent": return "📧 Email Agent";
       case "calendar_agent": return "📅 Calendar Agent";
       case "file_summarizer_agent": return "📄 File Summarizer Agent";
       case "notes_agent": return "📝 Notes Agent";
@@ -238,7 +234,6 @@ function App() {
   };
 
   const quickActions = [
-    { text: "Send an email to john@example.com about meeting", icon: <Mail className="w-4 h-4" /> },
     { text: "What's on my calendar today?", icon: <Calendar className="w-4 h-4" /> },
     { text: "Take a note: Remember to follow up on project proposal", icon: <StickyNote className="w-4 h-4" /> },
     { text: "Help me schedule a team meeting for tomorrow", icon: <Calendar className="w-4 h-4" /> }

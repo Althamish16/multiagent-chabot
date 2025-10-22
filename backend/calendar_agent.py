@@ -20,7 +20,7 @@ class EnhancedCalendarAgent:
             api_version=AZURE_OPENAI_API_VERSION,
         )
         self.deployment_name = AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
-        self.system_message = "You are an enhanced Calendar Agent with coordination capabilities. Schedule meetings, manage attendees, and collaborate with email and notes agents."
+        self.system_message = "You are an enhanced Calendar Agent with coordination capabilities. Schedule meetings, manage attendees, and collaborate with notes agents."
         self.model = self.deployment_name
 
     async def process_request(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -28,32 +28,6 @@ class EnhancedCalendarAgent:
         user_message = state["user_request"]
         context = state.get("context", {})
         conversation_history = state.get("conversation_history", [])
-
-        # Check if this is from email agent collaboration
-        email_context = context.get("email_agent", {})
-
-        if email_context.get("meeting_required"):
-            # Process meeting from email collaboration
-            meeting_details = email_context.get("meeting_details", {})
-
-            result = await EnhancedMockGraphAPI.create_calendar_event_with_attendees(
-                title=meeting_details.get("title", "Collaborative Meeting"),
-                start_date="2024-01-16T14:00:00Z",  # Smart scheduling logic would go here
-                end_date="2024-01-16T15:00:00Z",
-                description=meeting_details.get("agenda", "Meeting scheduled via agent collaboration"),
-                attendees=[email_context.get("email_to")]
-            )
-
-            return {
-                "status": "success",
-                "result": result,
-                "message": f"📅 Meeting '{result['title']}' scheduled with enhanced features",
-                "collaboration_data": {
-                    "meeting_link": result["meeting_link"],
-                    "attendees_notified": result["notifications_sent"],
-                    "event_id": result["id"]
-                }
-            }
 
         # Regular calendar processing with AI enhancement
         history_text = "\n".join(conversation_history) if conversation_history else "No previous conversation."

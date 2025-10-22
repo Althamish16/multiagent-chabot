@@ -31,6 +31,8 @@ dist/
 dist
 
 # Environment files (comprehensive coverage)
+/data/
+backend/data/*
 
 .env
 *token.json*
