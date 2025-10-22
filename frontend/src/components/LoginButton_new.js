@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAuth } from './AuthProvider';
+import { useAuth } from './AuthProvider_new';
 import { Button } from './ui/button';
 import { LogIn, LogOut, User } from 'lucide-react';
 
@@ -7,10 +7,10 @@ export const LoginButton = () => {
     const { user, isAuthenticated, loading, login, logout, error } = useAuth();
     const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-    const handleLogin = () => {
+    const handleLogin = async () => {
         setIsLoggingIn(true);
         try {
-            login();
+            await login();
         } catch (err) {
             console.error('Login error:', err);
             // Error is handled in AuthProvider

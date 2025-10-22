@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useAuth } from './AuthProvider';
+import { useAuth } from './AuthProvider_new';
 
 const GoogleCallback = () => {
     const { handleAuthCallback } = useAuth();

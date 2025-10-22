@@ -1,95 +1,57 @@
 from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Depends, Request
-from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import asyncio
-from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
+from pydantic import BaseModel
+from typing import Dict, Any, Optional
 from datetime import datetime, timezone
 import uuid
-import json
-import uuid
-from datetime import datetime, timezone
 import json
 
 # Import configuration
 from config import (
-    MONGO_URL, DB_NAME, CORS_ORIGINS, 
+    MONGO_URL, DB_NAME, CORS_ORIGINS,
     HAS_LLM_KEYS, HAS_GOOGLE_CONFIG, USE_DATABASE,
     AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
 )
 
-# Conditional imports based on configuration
-if HAS_LLM_KEYS:
-    try:
-        from openai import AzureOpenAI
-        print("✅ Azure OpenAI integration loaded")
-    except ImportError:
-        print("⚠️ Azure OpenAI package not available, using mock responses")
-        HAS_LLM_KEYS = False
+# Import database utilities
+from database_utils import save_message, get_chat_history_by_session, set_database_connection, ChatMessage, save_note
 
-if HAS_GOOGLE_CONFIG:
-    try:
-        from google_auth import (
-            GoogleOAuth, UserProfile, AuthToken, 
-            get_current_user, session_manager, 
-            is_authenticated_request, get_user_from_request, GoogleAPIClient
-        )
-        print("✅ Google OAuth authentication loaded")
-    except ImportError as e:
-        print(f"⚠️ Google OAuth authentication not available: {e}")
-        HAS_GOOGLE_CONFIG = False
+# Required imports - no fallbacks
+try:
+    from openai import AzureOpenAI
+    print("✅ Azure OpenAI integration loaded")
+except ImportError as e:
+    raise RuntimeError(f"❌ Azure OpenAI package not available: {e}")
 
-# Try to import enhanced agents separately
-enhanced_orchestrator = None
-if HAS_GOOGLE_CONFIG and HAS_LLM_KEYS:
-    try:
-        from enhanced_agents import MultiAgentOrchestrator
-        enhanced_orchestrator = MultiAgentOrchestrator()
-        print("✅ Enhanced agents loaded")
-    except ImportError as e:
-        print(f"⚠️ Enhanced agents not available: {e}")
-        enhanced_orchestrator = None
+# Import new auth system
+try:
+    from auth_new import (
+        google_auth,
+        get_current_user,
+        get_google_token,
+        get_optional_user,
+        session_store,
+        UserProfile
+    )
+    from auth_routes import auth_router, create_callback_html
+    print("✅ Google OAuth authentication loaded")
+except ImportError as e:
+    raise RuntimeError(f"❌ Google OAuth authentication not available: {e}")
 
-# Initialize Google OAuth auth if configured
-google_auth = None
-if HAS_GOOGLE_CONFIG:
-    try:
-        google_auth = GoogleOAuth()
-        print("✅ Google OAuth auth initialized")
-    except Exception as e:
-        print(f"⚠️ Google OAuth auth initialization failed: {e}")
-        google_auth = None
+try:
+    from enhanced_agents import DynamicMultiAgentOrchestrator
+    enhanced_orchestrator = DynamicMultiAgentOrchestrator()
+    print("✅ Enhanced agents loaded")
+except ImportError as e:
+    raise RuntimeError(f"❌ Enhanced agents not available: {e}")
 
-# MongoDB connection (optional for POC)
-client = None
-db = None
-
-def init_database():
-    """Initialize database connection if configured"""
-    global client, db
-    if USE_DATABASE and MONGO_URL:
-        try:
-            client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=3000)
-            db = client[DB_NAME]
-            print(f"✅ MongoDB configured for: {DB_NAME}")
-        except Exception as e:
-            print(f"⚠️ MongoDB connection failed: {e}")
-            print("💡 Falling back to in-memory storage")
-            client = None
-            db = None
-    else:
-        print("✅ POC Mode: Using in-memory storage (no database required)")
-
-# Initialize database
-init_database()
-
-# In-memory storage for POC mode
-in_memory_messages = []
-print("📝 Message storage ready (DB or in-memory for POC)")
+# JSON file storage (no MongoDB needed for POC)
+print("📝 Using JSON file storage for chat messages")
 
 from contextlib import asynccontextmanager
 
@@ -98,11 +60,19 @@ async def lifespan(app: FastAPI):
     # Startup
     yield
     # Shutdown
-    if client:
-        client.close()
+    pass
 
 # Create the main app with lifespan
 app = FastAPI(title="AI Agents POC", version="1.0.0", lifespan=lifespan)
+
+# CORS middleware (MUST be added before routers)
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=CORS_ORIGINS.split(',') if CORS_ORIGINS else ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Create API router
 api_router = APIRouter(prefix="/api")
@@ -112,44 +82,7 @@ class MockUserMessage:
     def __init__(self, text: str):
         self.text = text
 
-class MockLlmChat:
-    def __init__(self, api_key: str = None, session_id: str = None, system_message: str = None):
-        self.session_id = session_id
-        self.system_message = system_message
-    
-    def with_model(self, provider: str, model: str):
-        return self
-    
-    async def send_message(self, message):
-        """Mock LLM response based on input"""
-        text = message.text.lower()
-        
-        # Route based on keywords
-        if any(word in text for word in ['email', 'send', 'mail']):
-            if 'extract' in text and 'json' in text:
-                return '{"to": "user@example.com", "subject": "Hello", "body": "This is a test email."}'
-            return "I'll help you send an email. Please provide the recipient, subject, and message content."
-        elif any(word in text for word in ['calendar', 'meeting', 'schedule']):
-            if 'extract' in text and 'json' in text:
-                return '{"title": "Team Meeting", "start_date": "2024-01-16T14:00:00Z", "end_date": "2024-01-16T15:00:00Z", "description": "Weekly team sync"}'
-            return "I'll help you manage your calendar. What would you like to schedule?"
-        elif any(word in text for word in ['note', 'remember', 'save']):
-            if 'extract' in text and 'json' in text:
-                return '{"title": "Important Note", "content": "This is an important reminder.", "category": "Work"}'
-            return "I'll help you take notes. What would you like to remember?"
-        elif any(word in text for word in ['summarize', 'analyze', 'document']):
-            return "This document contains important information about the project. Key points include project objectives, timeline, and deliverables. Action items: review requirements, schedule next meeting, and prepare status report."
-        elif 'route' in text or 'agent' in text:
-            if 'email' in text:
-                return '{"agent": "email_agent", "action": "send_email", "parameters": {}}'
-            elif 'calendar' in text or 'meeting' in text:
-                return '{"agent": "calendar_agent", "action": "manage_calendar", "parameters": {}}'
-            elif 'note' in text:
-                return '{"agent": "notes_agent", "action": "create_note", "parameters": {}}'
-            elif 'file' in text or 'document' in text:
-                return '{"agent": "file_summarizer_agent", "action": "summarize", "parameters": {}}'
-        
-        return "Hello! I'm your AI assistant running in demo mode. I can help you with emails, calendar, notes, and file analysis. Try asking me to send an email or schedule a meeting!"
+# Removed MockLlmChat - using real Azure OpenAI only
 
 # Azure OpenAI wrapper class
 class AzureLlmChat:
@@ -165,12 +98,40 @@ class AzureLlmChat:
         self.messages = []
         if system_message:
             self.messages.append({"role": "system", "content": system_message})
-    
-    def with_model(self, provider: str, model: str):
-        # For Azure, model is deployment name
-        return self
-    
+
+    async def load_conversation_history(self, session_id: str):
+        """Load conversation history for the session"""
+        try:
+            # Get recent messages from the session (limit to last 20 for context window)
+            messages = await get_chat_history_by_session(session_id)
+            recent_messages = messages[-20:]  # Keep only recent messages
+
+            # Convert to OpenAI message format
+            conversation_messages = []
+            if self.system_message:
+                conversation_messages.append({"role": "system", "content": self.system_message})
+
+            for msg in recent_messages:
+                role = "user" if msg.sender == "user" else "assistant"
+                conversation_messages.append({
+                    "role": role,
+                    "content": msg.message
+                })
+
+            self.messages = conversation_messages
+            logging.info(f"Loaded {len(recent_messages)} messages for session {session_id}")
+        except Exception as e:
+            logging.warning(f"Failed to load conversation history: {e}")
+            # Fallback to system message only
+            self.messages = []
+            if self.system_message:
+                self.messages.append({"role": "system", "content": self.system_message})
+
     async def send_message(self, message):
+        # Load conversation history if session_id is provided and messages not loaded yet
+        if self.session_id and len(self.messages) <= 1:  # Only system message or empty
+            await self.load_conversation_history(self.session_id)
+
         self.messages.append({"role": "user", "content": message.text})
         response = await self.client.chat.completions.create(
             model=self.deployment_name,
@@ -180,37 +141,10 @@ class AzureLlmChat:
         self.messages.append({"role": "assistant", "content": content})
         return content
 
-# Initialize LLM Chat (with fallback to mock)
-if HAS_LLM_KEYS and 'AzureOpenAI' in globals():
-    try:
-        llm_chat = AzureLlmChat(
-            api_key=AZURE_OPENAI_API_KEY,
-            endpoint=AZURE_OPENAI_ENDPOINT,
-            api_version=AZURE_OPENAI_API_VERSION,
-            deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
-            session_id="ai-agents-orchestrator",
-            system_message="You are an AI Agent Orchestrator. Analyze user requests and determine which specialized agent should handle the task: email_agent, calendar_agent, file_summarizer_agent, or notes_agent. Respond with JSON format: {'agent': 'agent_name', 'action': 'action_description', 'parameters': {...}}"
-        )
-        UserMessage = MockUserMessage  # Use MockUserMessage as it's compatible
-        print("✅ Azure OpenAI Chat initialized")
-    except Exception as e:
-        print(f"⚠️ Azure OpenAI initialization failed, using mock: {e}")
-        llm_chat = MockLlmChat()
-        UserMessage = MockUserMessage
-else:
-    print("ℹ️ Using mock LLM for demo mode")
-    llm_chat = MockLlmChat()
-    UserMessage = MockUserMessage
+# Initialize UserMessage for compatibility
+UserMessage = MockUserMessage
 
 # Pydantic Models
-class ChatMessage(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    message: str
-    sender: str  # 'user' or 'agent'
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    agent_type: Optional[str] = None
-    session_id: str
-
 class ChatMessageCreate(BaseModel):
     message: str
     session_id: str
@@ -220,275 +154,333 @@ class ChatResponse(BaseModel):
     agent_used: str
     timestamp: datetime
     session_id: str
+    html_response: Optional[str] = None
 
-class EmailAction(BaseModel):
-    to: str
-    subject: str
-    body: str
-    action: str = "send_email"
+# HTML formatting and streaming utilities
+def format_response_as_html(text: str, agent_type: str = "general") -> str:
+    """Format LLM response as HTML with proper styling"""
+    import re
 
-class CalendarAction(BaseModel):
-    title: str
-    start_date: str
-    end_date: str
-    description: Optional[str] = None
-    action: str
+    # Escape HTML characters
+    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
-class NotesAction(BaseModel):
-    content: str
-    title: Optional[str] = None
-    category: Optional[str] = "General"
-    action: str
+    # Convert markdown-style formatting to HTML
+    # Headers
+    text = re.sub(r'^### (.*)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
+    text = re.sub(r'^## (.*)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
+    text = re.sub(r'^# (.*)$', r'<h1>\1</h1>', text, flags=re.MULTILINE)
 
-# Helper functions for POC storage
-async def save_message(message_doc: ChatMessage):
-    """Save message to database or in-memory storage"""
-    if db:
-        try:
-            await db.chat_messages.insert_one(message_doc.dict())
-        except Exception as e:
-            print(f"DB save failed, using memory: {e}")
-            in_memory_messages.append(message_doc.dict())
-    else:
-        # POC mode: store in memory
-        in_memory_messages.append(message_doc.dict())
-        # Keep only last 100 messages to prevent memory issues
-        if len(in_memory_messages) > 100:
-            in_memory_messages.pop(0)
+    # Bold
+    text = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', text)
 
-async def get_chat_history_by_session(session_id: str):
-    """Get chat history from database or in-memory storage"""
-    if db:
-        try:
-            messages = await db.chat_messages.find(
-                {"session_id": session_id}
-            ).sort("timestamp", 1).to_list(100)
-            return [ChatMessage(**msg) for msg in messages]
-        except Exception as e:
-            print(f"DB read failed, using memory: {e}")
-            # Fallback to memory
-    
-    # POC mode: filter in-memory messages
-    session_messages = [
-        ChatMessage(**msg) for msg in in_memory_messages 
-        if msg.get("session_id") == session_id
-    ]
-    return sorted(session_messages, key=lambda x: x.timestamp)
+    # Italic
+    text = re.sub(r'\*(.*?)\*', r'<em>\1</em>', text)
 
-# Mock Microsoft Graph API responses
-class MockGraphAPI:
-    @staticmethod
-    async def send_email(to: str, subject: str, body: str):
-        """Mock email sending"""
-        await asyncio.sleep(0.5)  # Simulate API delay
-        return {
-            "id": f"mock-email-{uuid.uuid4()}",
-            "status": "sent",
-            "to": to,
-            "subject": subject,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    
-    @staticmethod
-    async def get_calendar_events():
-        """Mock calendar events"""
-        await asyncio.sleep(0.3)
-        return [
-            {
-                "id": "1",
-                "title": "Team Standup",
-                "start": "2024-01-15T09:00:00Z",
-                "end": "2024-01-15T09:30:00Z",
-                "description": "Daily team sync"
-            },
-            {
-                "id": "2", 
-                "title": "Client Demo",
-                "start": "2024-01-15T14:00:00Z",
-                "end": "2024-01-15T15:00:00Z",
-                "description": "Product demonstration for key client"
-            }
-        ]
-    
-    @staticmethod
-    async def create_calendar_event(title: str, start_date: str, end_date: str, description: str = ""):
-        """Mock calendar event creation"""
-        await asyncio.sleep(0.4)
-        return {
-            "id": f"mock-event-{uuid.uuid4()}",
-            "title": title,
-            "start": start_date,
-            "end": end_date,
-            "description": description,
-            "status": "created"
-        }
-    
-    @staticmethod
-    async def save_note(title: str, content: str, category: str = "General"):
-        """Mock OneNote saving"""
-        await asyncio.sleep(0.3)
-        return {
-            "id": f"mock-note-{uuid.uuid4()}",
-            "title": title,
-            "content": content,
-            "category": category,
-            "created": datetime.now(timezone.utc).isoformat()
-        }
+    # Code blocks
+    text = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', text, flags=re.DOTALL)
+
+    # Inline code
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+
+    # Lists
+    text = re.sub(r'^\* (.*)$', r'<li>\1</li>', text, flags=re.MULTILINE)
+    text = re.sub(r'^\d+\. (.*)$', r'<li>\1</li>', text, flags=re.MULTILINE)
+
+    # Wrap in paragraphs
+    paragraphs = []
+    for para in text.split('\n\n'):
+        if para.strip():
+            if para.startswith('<h') or para.startswith('<li') or para.startswith('<pre'):
+                paragraphs.append(para)
+            else:
+                paragraphs.append(f'<p>{para}</p>')
+
+    text = '\n'.join(paragraphs)
+
+    # Add agent-specific styling
+    agent_colors = {
+        "email_agent": "#007bff",
+        "calendar_agent": "#28a745",
+        "notes_agent": "#ffc107",
+        "file_summarizer_agent": "#dc3545",
+        "general": "#6c757d"
+    }
+
+    color = agent_colors.get(agent_type, agent_colors["general"])
+
+    return f'<div class="agent-response" style="border-left: 4px solid {color}; padding-left: 10px; margin: 10px 0;">{text}</div>'
+
+async def stream_llm_response(message: str, session_id: str, agent_type: str = "general"):
+    """Stream LLM response with HTML formatting via SSE"""
+    try:
+        # Save user message first
+        user_message_doc = ChatMessage(
+            id=str(uuid.uuid4()),
+            message=message,
+            sender="user",
+            timestamp=datetime.now(timezone.utc),
+            session_id=session_id
+        )
+        await save_message(user_message_doc)
+
+        # Create session-aware LLM chat instance
+        session_llm_chat = AzureLlmChat(
+            api_key=AZURE_OPENAI_API_KEY,
+            endpoint=AZURE_OPENAI_ENDPOINT,
+            api_version=AZURE_OPENAI_API_VERSION,
+            deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
+            session_id=session_id,
+            system_message="You are a helpful AI assistant. Provide clear, well-formatted responses."
+        )
+
+        # Load conversation history
+        await session_llm_chat.load_conversation_history(session_id)
+
+        # Add current user message
+        session_llm_chat.messages.append({"role": "user", "content": message})
+
+        # Stream the response
+        response = await session_llm_chat.client.chat.completions.create(
+            model=session_llm_chat.deployment_name,
+            messages=session_llm_chat.messages,
+            stream=True
+        )
+
+        accumulated_text = ""
+        async for chunk in response:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                accumulated_text += content
+
+                # Format partial response as HTML
+                html_content = format_response_as_html(accumulated_text, agent_type)
+
+                # Send SSE event
+                yield f"data: {json.dumps({'html': html_content, 'text': accumulated_text})}\n\n"
+                await asyncio.sleep(0.01)  # Small delay for smooth streaming
+
+        # Add final response to conversation history
+        session_llm_chat.messages.append({"role": "assistant", "content": accumulated_text})
+
+        # Save agent response
+        agent_message_doc = ChatMessage(
+            id=str(uuid.uuid4()),
+            message=accumulated_text,
+            sender="agent",
+            timestamp=datetime.now(timezone.utc),
+            session_id=session_id,
+            agent_type=agent_type
+        )
+        await save_message(agent_message_doc)
+
+        # Send completion event
+        yield f"data: {json.dumps({'complete': True, 'final_text': accumulated_text})}\n\n"
+
+    except Exception as e:
+        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+# Removed MockGraphAPI - using Google APIs instead
 
 # Specialized Agents
 class EmailAgent:
     def __init__(self):
-        if HAS_LLM_KEYS and 'AzureOpenAI' in globals():
-            try:
-                self.llm = AzureLlmChat(
-                    api_key=AZURE_OPENAI_API_KEY,
-                    endpoint=AZURE_OPENAI_ENDPOINT,
-                    api_version=AZURE_OPENAI_API_VERSION,
-                    deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
-                    session_id="email-agent",
-                    system_message="You are an Email Agent. Help users compose and send emails. Extract recipient, subject, and body from user requests."
-                )
-            except:
-                self.llm = MockLlmChat(session_id="email-agent")
+        # Import the secure email agent
+        try:
+            from .email_agent import SecureEmailAgent
+            self.agent = SecureEmailAgent()
+        except ImportError:
+            # Fallback to mock if secure agent not available
+            self.agent = None
+
+    async def process_request(self, user_message: str, parameters: Dict[str, Any], access_token: str = None):
+        if not self.agent:
+            return "❌ Email agent not available"
+
+        action = parameters.get('action', 'draft')
+        
+        if action == 'approve_send':
+            # Send the pending draft
+            if access_token:
+                return await self.approve_and_send(access_token)
+            else:
+                return "❌ No access token available. Please sign in with Google to send emails."
+        elif action == 'cancel':
+            # Cancel the pending draft
+            self.pending_draft = None
+            return "📧 Email draft cancelled."
         else:
-            self.llm = MockLlmChat(session_id="email-agent")
-    
-    async def process_request(self, user_message: str, parameters: Dict[str, Any]):
-        # Use AI to extract email details if not provided
-        if not all(k in parameters for k in ['to', 'subject', 'body']):
-            extraction_prompt = f"Extract email details from: '{user_message}'. Return JSON with 'to', 'subject', 'body' fields."
-            user_msg = UserMessage(text=extraction_prompt)
-            response = await self.llm.send_message(user_msg)
-            
-            try:
-                email_details = json.loads(response)
-                parameters.update(email_details)
-            except:
-                return "Sorry, I couldn't extract the email details. Please provide recipient, subject, and message content."
-        
-        # Send email using mock API
-        result = await MockGraphAPI.send_email(
-            to=parameters['to'],
-            subject=parameters['subject'], 
-            body=parameters['body']
-        )
-        
-        return f"✅ Email sent successfully to {result['to']} with subject '{result['subject']}'"
+            # Draft new email
+            state = {
+                "user_request": user_message,
+                "action": "draft",
+                "context": parameters.get('context', {}),
+                "draft": parameters.get('draft'),
+                "access_token": access_token
+            }
+
+            result = await self.agent.process_request(state)
+
+            if result.get("requires_approval"):
+                # Store draft for later approval
+                self.pending_draft = result.get("draft")
+                return result["message"] + "\n\nReply with 'yes' to send this email or 'no' to cancel."
+
+            return result.get("message", "Email processed")
+
+    async def approve_and_send(self, access_token: str):
+        """Send the pending draft after approval"""
+        if not hasattr(self, 'pending_draft') or not self.pending_draft:
+            return "❌ No pending email draft to send"
+
+        state = {
+            "action": "send",
+            "draft": self.pending_draft,
+            "access_token": access_token
+        }
+
+        result = await self.agent.process_request(state)
+
+        # Clear pending draft
+        self.pending_draft = None
+
+        return result.get("message", "Email sent")
 
 class CalendarAgent:
     def __init__(self):
-        if HAS_LLM_KEYS and 'AzureOpenAI' in globals():
-            try:
-                self.llm = AzureLlmChat(
-                    api_key=AZURE_OPENAI_API_KEY,
-                    endpoint=AZURE_OPENAI_ENDPOINT,
-                    api_version=AZURE_OPENAI_API_VERSION,
-                    deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
-                    session_id="calendar-agent",
-                    system_message="You are a Calendar Agent. Help users manage their calendar - view, create, or modify events."
-                )
-            except:
-                self.llm = MockLlmChat(session_id="calendar-agent")
-        else:
-            self.llm = MockLlmChat(session_id="calendar-agent")
-    
-    async def process_request(self, user_message: str, parameters: Dict[str, Any]):
+        try:
+            self.llm = AzureLlmChat(
+                api_key=AZURE_OPENAI_API_KEY,
+                endpoint=AZURE_OPENAI_ENDPOINT,
+                api_version=AZURE_OPENAI_API_VERSION,
+                deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
+                session_id="calendar-agent",
+                system_message="You are a Calendar Agent. Help users manage their calendar - view, create, or modify events."
+            )
+        except Exception as e:
+            raise RuntimeError(f"❌ Calendar agent LLM initialization failed: {e}")
+
+    async def process_request(self, user_message: str, parameters: Dict[str, Any], access_token: str = None):
+        if not access_token:
+            raise RuntimeError("❌ Access token required for calendar operations")
+
         action = parameters.get('action', 'view')
-        
+
         if action == 'view' or 'schedule' in user_message.lower() or 'calendar' in user_message.lower():
-            events = await MockGraphAPI.get_calendar_events()
-            events_text = "📅 Your upcoming events:\n\n"
-            for event in events:
-                events_text += f"• {event['title']}\n  Time: {event['start']} to {event['end']}\n  {event['description']}\n\n"
-            return events_text
-            
-        elif action == 'create' or 'add' in user_message.lower() or 'meeting' in user_message.lower():
-            # Extract event details using AI
-            extraction_prompt = f"Extract meeting details from: '{user_message}'. Return JSON with 'title', 'start_date', 'end_date', 'description'."
-            user_msg = UserMessage(text=extraction_prompt)
-            response = await self.llm.send_message(user_msg)
-            
             try:
+                google_client = GoogleAPIClient(access_token)
+                events = await google_client.get_calendar_events()
+                events_text = "📅 Your upcoming events:\n\n"
+                for event in events:
+                    events_text += f"• {event['title']}\n  Time: {event['start']} to {event['end']}\n  {event.get('description', 'No description')}\n\n"
+                return events_text
+            except Exception as e:
+                raise RuntimeError(f"❌ Failed to get calendar events: {e}")
+
+        elif action == 'create' or 'add' in user_message.lower() or 'meeting' in user_message.lower():
+            try:
+                # Extract event details using AI
+                extraction_prompt = f"Extract meeting details from: '{user_message}'. Return JSON with 'title', 'start_date', 'end_date', 'description'."
+                user_msg = UserMessage(text=extraction_prompt)
+                response = await self.llm.send_message(user_msg)
+
                 event_details = json.loads(response)
-                result = await MockGraphAPI.create_calendar_event(
+                google_client = GoogleAPIClient(access_token)
+                result = await google_client.create_calendar_event(
                     title=event_details.get('title', 'New Meeting'),
-                    start_date=event_details.get('start_date', '2024-01-16T10:00:00Z'),
-                    end_date=event_details.get('end_date', '2024-01-16T11:00:00Z'),
+                    start=event_details.get('start_date', '2024-01-16T10:00:00Z'),
+                    end=event_details.get('end_date', '2024-01-16T11:00:00Z'),
                     description=event_details.get('description', '')
                 )
                 return f"📅 Event '{result['title']}' created successfully for {result['start']}"
-            except:
-                return "Sorry, I couldn't extract the meeting details. Please provide title, date, and time."
+            except json.JSONDecodeError:
+                return "❌ Sorry, I couldn't extract the meeting details. Please provide title, date, and time."
+            except Exception as e:
+                raise RuntimeError(f"❌ Failed to create calendar event: {e}")
+        else:
+            return "❌ Unknown calendar action"
 
 class FileSummarizerAgent:
     def __init__(self):
-        if HAS_LLM_KEYS and 'AzureOpenAI' in globals():
-            try:
-                self.llm = AzureLlmChat(
-                    api_key=AZURE_OPENAI_API_KEY,
-                    endpoint=AZURE_OPENAI_ENDPOINT,
-                    api_version=AZURE_OPENAI_API_VERSION,
-                    deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
-                    session_id="file-summarizer-agent",
-                    system_message="You are a File Summarizer Agent. Analyze and summarize document content. Provide key summaries, main points, and action items."
-                )
-            except:
-                self.llm = MockLlmChat(session_id="file-summarizer-agent")
-        else:
-            self.llm = MockLlmChat(session_id="file-summarizer-agent")
+        try:
+            self.llm = AzureLlmChat(
+                api_key=AZURE_OPENAI_API_KEY,
+                endpoint=AZURE_OPENAI_ENDPOINT,
+                api_version=AZURE_OPENAI_API_VERSION,
+                deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
+                session_id="file-summarizer-agent",
+                system_message="You are a File Summarizer Agent. Analyze and summarize document content. Provide key summaries, main points, and action items."
+            )
+        except Exception as e:
+            raise RuntimeError(f"❌ File summarizer agent LLM initialization failed: {e}")
     
-    async def process_request(self, user_message: str, file_content: str = None):
+    async def process_request(self, user_message: str, parameters: Dict[str, Any], access_token: str = None):
+        file_content = parameters.get('file_content')
         if not file_content:
             return "📄 Please upload a file to summarize. I support PDF, DOCX, TXT, and other common formats."
-        
+
         summary_prompt = f"Analyze and summarize this document content:\n\n{file_content}\n\nProvide: 1) Key summary, 2) Main points, 3) Action items (if any)"
         user_msg = UserMessage(text=summary_prompt)
         response = await self.llm.send_message(user_msg)
-        
+
         return f"📄 **Document Summary:**\n\n{response}"
 
 class NotesAgent:
     def __init__(self):
-        if HAS_LLM_KEYS and 'AzureOpenAI' in globals():
-            try:
-                self.llm = AzureLlmChat(
-                    api_key=AZURE_OPENAI_API_KEY,
-                    endpoint=AZURE_OPENAI_ENDPOINT,
-                    api_version=AZURE_OPENAI_API_VERSION,
-                    deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
-                    session_id="notes-agent",
-                    system_message="You are a Notes Agent. Help users take, organize, and retrieve notes. Extract key information and categorize appropriately."
-                )
-            except:
-                self.llm = MockLlmChat(session_id="notes-agent")
-        else:
-            self.llm = MockLlmChat(session_id="notes-agent")
-    
-    async def process_request(self, user_message: str, parameters: Dict[str, Any]):
+        try:
+            self.llm = AzureLlmChat(
+                api_key=AZURE_OPENAI_API_KEY,
+                endpoint=AZURE_OPENAI_ENDPOINT,
+                api_version=AZURE_OPENAI_API_VERSION,
+                deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
+                session_id="notes-agent",
+                system_message="You are a Notes Agent. Help users take, organize, and retrieve notes. Extract key information and categorize appropriately."
+            )
+        except Exception as e:
+            raise RuntimeError(f"❌ Notes agent LLM initialization failed: {e}")
+
+    async def process_request(self, user_message: str, parameters: Dict[str, Any], access_token: str = None):
         action = parameters.get('action', 'create')
-        
+
         if action == 'create' or 'note' in user_message.lower() or 'remember' in user_message.lower():
-            # Extract note details using AI
-            extraction_prompt = f"Extract note details from: '{user_message}'. Return JSON with 'title', 'content', 'category'."
-            user_msg = UserMessage(text=extraction_prompt)
-            response = await self.llm.send_message(user_msg)
-            
             try:
+                # Extract note details using AI
+                extraction_prompt = f"Extract note details from: '{user_message}'. Return JSON with 'title', 'content', 'category'."
+                user_msg = UserMessage(text=extraction_prompt)
+                response = await self.llm.send_message(user_msg)
+
                 note_details = json.loads(response)
-                result = await MockGraphAPI.save_note(
-                    title=note_details.get('title', 'Quick Note'),
-                    content=note_details.get('content', user_message),
-                    category=note_details.get('category', 'General')
-                )
-                return f"📝 Note '{result['title']}' saved successfully in {result['category']} category"
-            except:
+
+                # Save to JSON file
+                note_doc = {
+                    "title": note_details.get('title', 'Quick Note'),
+                    "content": note_details.get('content', user_message),
+                    "category": note_details.get('category', 'General'),
+                    "created_at": datetime.now(timezone.utc),
+                    "user_id": parameters.get('user_id', 'anonymous')
+                }
+
+                note_id = await save_note(note_doc)
+                print(f"📝 Note stored in JSON: {note_id}")
+
+                return f"📝 Note '{note_details.get('title', 'Quick Note')}' saved successfully in {note_details.get('category', 'General')} category"
+            except json.JSONDecodeError:
                 # Fallback to simple note creation
-                result = await MockGraphAPI.save_note(
-                    title="Quick Note",
-                    content=user_message,
-                    category="General"
-                )
-                return f"📝 Note saved: '{result['title']}'"
+                note_doc = {
+                    "title": "Quick Note",
+                    "content": user_message,
+                    "category": "General",
+                    "created_at": datetime.now(timezone.utc),
+                    "user_id": parameters.get('user_id', 'anonymous')
+                }
+
+                note_id = await save_note(note_doc)
+                print(f"📝 Note stored in JSON: {note_id}")
+
+                return f"📝 Note saved: 'Quick Note'"
+            except Exception as e:
+                raise RuntimeError(f"❌ Failed to save note: {e}")
+        else:
+            return "❌ Unknown notes action"
         
         return "📝 Note functionality ready. Tell me what you'd like to remember!"
 
@@ -498,15 +490,47 @@ calendar_agent = CalendarAgent()
 file_summarizer_agent = FileSummarizerAgent()
 notes_agent = NotesAgent()
 
+# Agent registry for scalable processing
+agents = {
+    'email_agent': email_agent,
+    'calendar_agent': calendar_agent,
+    'file_summarizer_agent': file_summarizer_agent,
+    'notes_agent': notes_agent
+}
+
+# Helper function for agent processing
+async def process_agent_request(agent_name: str, user_message: str, parameters: Dict[str, Any] = None, access_token: str = None) -> str:
+    """Process request with specified agent"""
+    if parameters is None:
+        parameters = {}
+
+    if agent_name in agents:
+        try:
+            # All agents now require access_token for Google API operations
+            return await agents[agent_name].process_request(user_message, parameters, access_token)
+        except Exception as e:
+            logging.error(f"Error processing {agent_name} request: {str(e)}")
+            raise RuntimeError(f"❌ Error processing {agent_name.replace('_', ' ')} request: {str(e)}")
+    elif agent_name == 'general':
+        return "🤖 Hello! I'm your AI Agents assistant. I can help you with:\n\n📧 **Email** - Send emails to anyone\n📅 **Calendar** - Manage your schedule and events\n📄 **File Summarization** - Analyze and summarize documents\n📝 **Notes** - Take and organize your notes\n\n💡 **Try saying:**\n• \"Send an email to john@company.com about the meeting\"\n• \"What's on my calendar today?\"\n• \"Take a note about project deadlines\"\n• Upload a document for analysis\n\nWhat would you like to do?"
+    else:
+        raise RuntimeError(f"❌ Unknown agent: {agent_name}")
+
 # Agent Orchestrator
 class AgentOrchestrator:
     @staticmethod
     async def route_request(user_message: str) -> Dict[str, Any]:
         """Determine which agent should handle the request"""
         
-        # Simple keyword-based routing with AI fallback
-        message_lower = user_message.lower()
+        message_lower = user_message.lower().strip()
         
+        # Handle email approval responses
+        if message_lower in ['yes', 'y', 'approve', 'send', 'confirm']:
+            return {'agent': 'email_agent', 'action': 'approve_send', 'parameters': {}}
+        elif message_lower in ['no', 'n', 'cancel', 'reject']:
+            return {'agent': 'email_agent', 'action': 'cancel', 'parameters': {}}
+        
+        # Simple keyword-based routing with AI fallback
         if any(word in message_lower for word in ['email', 'send', 'mail', 'message']):
             return {'agent': 'email_agent', 'action': 'send_email', 'parameters': {}}
         elif any(word in message_lower for word in ['calendar', 'meeting', 'schedule', 'event', 'appointment']):
@@ -516,85 +540,27 @@ class AgentOrchestrator:
         elif any(word in message_lower for word in ['summarize', 'summary', 'analyze', 'document', 'file']):
             return {'agent': 'file_summarizer_agent', 'action': 'summarize', 'parameters': {}}
         else:
-            # Use AI orchestrator for complex requests
+            # Use AI orchestrator for complex requests with conversation context
             try:
+                # Create session-aware LLM chat instance
+                session_llm_chat = AzureLlmChat(
+                    api_key=AZURE_OPENAI_API_KEY,
+                    endpoint=AZURE_OPENAI_ENDPOINT,
+                    api_version=AZURE_OPENAI_API_VERSION,
+                    deployment_name=AZURE_OPENAI_CHAT_DEPLOYMENT_NAME,
+                    session_id="routing_orchestrator",  # Use a generic session for routing
+                    system_message="You are an AI Agent Orchestrator. Analyze user requests and determine which specialized agent should handle the task: email_agent, calendar_agent, file_summarizer_agent, or notes_agent. Respond with JSON format: {'agent': 'agent_name', 'action': 'action_description', 'parameters': {...}}"
+                )
                 user_msg = UserMessage(text=f"Route this request to appropriate agent: {user_message}")
-                response = await llm_chat.send_message(user_msg)
+                response = await session_llm_chat.send_message(user_msg)
                 return json.loads(response)
-            except:
+            except Exception as e:
+                logging.error(f"AI routing failed: {e}")
                 return {'agent': 'general', 'action': 'help', 'parameters': {}}
 
 # Enhanced API Routes with Authentication
-
-# Authentication endpoints
-@api_router.get("/auth/login")
-async def login_redirect(redirect_uri: str = "http://localhost:5000/auth/google/callback"):
-    """Initiate Google OAuth login flow"""
-    if not google_auth:
-        raise HTTPException(
-            status_code=503,
-            detail="Google OAuth authentication not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env file"
-        )
-    
-    try:
-        auth_data = google_auth.get_auth_url()
-        return {
-            "auth_url": auth_data["auth_url"],
-            "state": auth_data["state"]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-class GoogleAuthCallbackRequest(BaseModel):
-    code: str
-    redirect_uri: str = "http://localhost:5000/auth/google/callback"
-
-@api_router.post("/auth/callback")
-async def auth_callback(auth_request: GoogleAuthCallbackRequest):
-    """Handle OAuth callback from Google"""
-    if not google_auth:
-        raise HTTPException(
-            status_code=503,
-            detail="Google OAuth authentication not configured. Please set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env file"
-        )
-    
-    try:
-        token_data = await google_auth.handle_auth_callback(auth_request.code, auth_request.redirect_uri)
-        
-        # Create session
-        session_id = session_manager.create_session(
-            user_id=token_data.user_profile.id,
-            token_data=token_data.dict()
-        )
-        
-        return {
-            "access_token": token_data.access_token,
-            "token_type": token_data.token_type,
-            "expires_in": token_data.expires_in,
-            "user_profile": token_data.user_profile,
-            "session_id": session_id
-        }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-@api_router.post("/auth/logout")
-async def logout(session_id: str = None):
-    """Logout user and invalidate session"""
-    if session_id and 'session_manager' in globals():
-        session_manager.delete_session(session_id)
-    
-    return {"message": "Logged out successfully"}
-
-@api_router.get("/auth/me")
-async def get_current_user_info(current_user: UserProfile = Depends(get_current_user)):
-    """Get current authenticated user information"""
-    return {
-        "id": current_user.id,
-        "name": current_user.name,
-        "email": current_user.email,
-        "picture": current_user.picture,
-        "verified_email": current_user.verified_email
-    }
+# Note: Auth endpoints (/auth/login, /auth/callback, /auth/logout, /auth/me) 
+# are now provided by auth_router (imported from auth_routes.py)
 
 # Main API Routes
 @api_router.get("/")
@@ -604,7 +570,7 @@ async def root():
         "message": "🚀 Multiagent Chatbot Backend Ready",
         "version": "2.0.0",
         "status": {
-            "storage": "in_memory" if not db else "database",
+            "storage": "json_files",
             "ai_responses": "configured" if HAS_LLM_KEYS else "not_configured",
             "authentication": "google_oauth" if HAS_GOOGLE_CONFIG else "not_configured",
             "ready": HAS_GOOGLE_CONFIG and HAS_LLM_KEYS
@@ -638,55 +604,50 @@ async def enhanced_chat_with_agents(
     try:
         # Save user message with user context
         user_message_doc = ChatMessage(
+            id=str(uuid.uuid4()),
             message=chat_input.message,
             sender="user", 
+            timestamp=datetime.now(timezone.utc),
             session_id=chat_input.session_id
         )
         
         await save_message(user_message_doc)
         
-        # Process with enhanced orchestrator if available
-        if enhanced_orchestrator:
-            result = await enhanced_orchestrator.process_request(
-                user_request=chat_input.message,
-                session_id=chat_input.session_id
-            )
-        else:
-            # Fallback to basic processing
-            routing_info = await AgentOrchestrator.route_request(chat_input.message)
-            agent_name = routing_info.get('agent', 'general')
-            
-            if agent_name == 'email_agent':
-                response = await email_agent.process_request(chat_input.message, routing_info.get('parameters', {}))
-            elif agent_name == 'calendar_agent':
-                response = await calendar_agent.process_request(chat_input.message, routing_info.get('parameters', {}))
-            elif agent_name == 'file_summarizer_agent':
-                response = await file_summarizer_agent.process_request(chat_input.message)
-            elif agent_name == 'notes_agent':
-                response = await notes_agent.process_request(chat_input.message, routing_info.get('parameters', {}))
-            else:
-                response = "🤖 Hello! I'm your AI assistant running in demo mode. I can help you with emails, calendar, notes, and file analysis."
-            
-            result = {
-                "response": response,
-                "agent_used": agent_name,
-                "workflow_type": "basic",
-                "agents_involved": [agent_name],
-                "collaboration_data": {}
-            }
+        logging.info("Processing with enhanced orchestrator")
+        # Process with enhanced orchestrator
+        result = await enhanced_orchestrator.process_request(
+            user_request=chat_input.message,
+            session_id=chat_input.session_id
+        )
+
+        # Validate result structure
+        if not isinstance(result, dict) or "response" not in result:
+            raise ValueError("Invalid result structure from orchestrator")
+
+        # Ensure required keys with defaults
+        result.setdefault("agent_used", "unknown")
+        result.setdefault("workflow_type", "single_agent")
+        result.setdefault("agents_involved", [])
+        result.setdefault("collaboration_data", {})
         
         # Save agent response with enhanced metadata
         agent_message_doc = ChatMessage(
+            id=str(uuid.uuid4()),
             message=result["response"],
             sender="agent",
+            timestamp=datetime.now(timezone.utc),
             session_id=chat_input.session_id,
             agent_type=result["agent_used"]
         )
         
         await save_message(agent_message_doc)
         
+        # Format response as HTML
+        html_response = format_response_as_html(result["response"], result["agent_used"])
+        
         return {
             "response": result["response"],
+            "html_response": html_response,
             "agent_used": result["agent_used"], 
             "workflow_type": result.get("workflow_type", "single_agent"),
             "agents_involved": result.get("agents_involved", []),
@@ -709,8 +670,10 @@ async def chat_with_agents(chat_input: ChatMessageCreate, request: Request, curr
     try:
         # Legacy processing for all requests
         user_message_doc = ChatMessage(
+            id=str(uuid.uuid4()),
             message=chat_input.message,
             sender="user",
+            timestamp=datetime.now(timezone.utc),
             session_id=chat_input.session_id
         )
         
@@ -726,33 +689,43 @@ async def chat_with_agents(chat_input: ChatMessageCreate, request: Request, curr
         # Add agent-specific processing delay
         await asyncio.sleep(0.3)
         
+        # Get access token for authenticated requests
+        access_token = None
+        if current_user:
+            # Get Google token from current user's session
+            try:
+                from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+                from auth import get_google_token
+                # The get_google_token dependency will extract it from the session
+                # For now, we'll try to get it from the user's token directly
+                access_token = None  # Will be None if not available
+            except:
+                access_token = None
+        
         # Process with specific agent
-        if agent_name == 'email_agent':
-            response = await email_agent.process_request(chat_input.message, routing_info.get('parameters', {}))
-        elif agent_name == 'calendar_agent':
-            response = await calendar_agent.process_request(chat_input.message, routing_info.get('parameters', {}))
-        elif agent_name == 'file_summarizer_agent':
-            response = await file_summarizer_agent.process_request(chat_input.message)
-        elif agent_name == 'notes_agent':
-            response = await notes_agent.process_request(chat_input.message, routing_info.get('parameters', {}))
-        else:
-            response = "🤖 Hello! I'm your AI Agents assistant. I can help you with:\n\n📧 **Email** - Send emails to anyone\n📅 **Calendar** - Manage your schedule and events\n📄 **File Summarization** - Analyze and summarize documents\n📝 **Notes** - Take and organize your notes\n\n💡 **Try saying:**\n• \"Send an email to john@company.com about the meeting\"\n• \"What's on my calendar today?\"\n• \"Take a note about project deadlines\"\n• Upload a document for analysis\n\n🚀 **New!** Sign in for enhanced multi-agent collaboration features!\n\nWhat would you like to do?"
+        response = await process_agent_request(agent_name, chat_input.message, routing_info.get('parameters', {}), access_token or "")
         
         # Save agent response
         agent_message_doc = ChatMessage(
+            id=str(uuid.uuid4()),
             message=response,
             sender="agent",
+            timestamp=datetime.now(timezone.utc),
             session_id=chat_input.session_id,
             agent_type=agent_name
         )
         
         await save_message(agent_message_doc)
         
+        # Format response as HTML
+        html_response = format_response_as_html(response, agent_name)
+        
         return ChatResponse(
             response=response,
             agent_used=agent_name,
             timestamp=datetime.now(timezone.utc),
-            session_id=chat_input.session_id
+            session_id=chat_input.session_id,
+            html_response=html_response
         )
         
     except Exception as e:
@@ -766,6 +739,32 @@ async def get_chat_history(session_id: str, current_user: UserProfile = Depends(
         return messages
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# SSE Streaming Chat Endpoint - Authentication temporarily disabled for testing
+@api_router.get("/chat/stream/{session_id}")
+async def stream_chat_response(
+    session_id: str,
+    message: str,
+    agent_type: str = "general"
+    # TODO: Re-enable authentication: current_user: UserProfile = Depends(get_current_user)
+):
+    """Stream chat response with HTML formatting via Server-Sent Events"""
+    try:
+        # Return streaming response
+        return StreamingResponse(
+            stream_llm_response(message, session_id, agent_type),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Headers": "Cache-Control",
+            }
+        )
+
+    except Exception as e:
+        logging.error(f"Streaming chat error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error streaming response: {str(e)}")
 
 # Enhanced File Upload with Authentication
 @api_router.post("/upload")
@@ -853,97 +852,31 @@ async def legacy_upload_file(file: UploadFile = File(...), session_id: str = "de
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File upload error: {str(e)}")
 
-# Include router
+# Add middleware to set security headers
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    
+    # For OAuth callback, use same-origin-allow-popups to allow popup communication
+    if "/auth/google/callback" in str(request.url):
+        response.headers["Cross-Origin-Opener-Policy"] = "unsafe-none"
+    else:
+        # For other routes, use same-origin-allow-popups for better security
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
+    
+    return response
+
+# Include routers (must be after middleware and route definitions)
 app.include_router(api_router)
+app.include_router(auth_router)
 
-# OAuth callback route (must be before CORS middleware)
-@app.get("/auth/google/callback")
-async def google_oauth_callback(code: str = None, state: str = None, error: str = None):
-    """Handle Google OAuth callback"""
-    if not google_auth:
-        return HTMLResponse("""
-        <html>
-        <body>
-        <script>
-        window.opener.postMessage({type: 'auth-error', error: 'Google OAuth not configured'}, '*');
-        window.close();
-        </script>
-        </body>
-        </html>
-        """)
-    
-    if error:
-        return HTMLResponse(f"""
-        <html>
-        <body>
-        <script>
-        window.opener.postMessage({{type: 'auth-error', error: '{error}'}}, '*');
-        window.close();
-        </script>
-        </body>
-        </html>
-        """)
-    
-    if not code:
-        return HTMLResponse("""
-        <html>
-        <body>
-        <script>
-        window.opener.postMessage({type: 'auth-error', error: 'No authorization code received'}, '*');
-        window.close();
-        </script>
-        </body>
-        </html>
-        """)
-    
-    try:
-        # Exchange code for tokens
-        token_data = await google_auth.handle_auth_callback(code, google_auth.config.REDIRECT_URI)
-        
-        # Create session
-        session_id = session_manager.create_session(
-            user_id=token_data.user_profile.id,
-            token_data=token_data.dict()
-        )
-        
-        # Return HTML that sends the token data to the parent window
-        import json
-        user_profile_json = json.dumps(token_data.user_profile.dict())
-        return HTMLResponse(f"""
-        <html>
-        <body>
-        <script>
-        window.opener.postMessage({{
-            type: 'auth-success',
-            access_token: '{token_data.access_token}',
-            user_profile: {user_profile_json},
-            session_id: '{session_id}'
-        }}, '*');
-        window.close();
-        </script>
-        </body>
-        </html>
-        """)
-    except Exception as e:
-        return HTMLResponse(f"""
-        <html>
-        <body>
-        <script>
-        window.opener.postMessage({{type: 'auth-error', error: '{str(e)}'}}, '*');
-        window.close();
-        </script>
-        </body>
-        </html>
-        """)
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=CORS_ORIGINS.split(',') if CORS_ORIGINS else ["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Mount static files from frontend build (LAST - catches all remaining routes)
+frontend_build_path = os.path.join(os.path.dirname(__file__), "..", "frontend", "build")
+if os.path.exists(frontend_build_path):
+    app.mount("/", StaticFiles(directory=frontend_build_path, html=True), name="frontend")
+    print(f"✅ Frontend static files mounted from: {frontend_build_path}")
+else:
+    print(f"⚠️  Frontend build not found at: {frontend_build_path}")
 
 # Configure logging
 logging.basicConfig(

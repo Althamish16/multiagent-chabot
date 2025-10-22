@@ -4,23 +4,30 @@ Enhanced Calendar Agent with coordination capabilities
 import json
 import os
 from typing import Dict, Any, List
-from openai import OpenAI
+from openai import AsyncAzureOpenAI
 
-from .mock_graph_api import EnhancedMockGraphAPI
+from mock_graph_api import EnhancedMockGraphAPI
 
 
 class EnhancedCalendarAgent:
     def __init__(self):
-        self.llm = OpenAI(
-            api_key=os.environ.get('OPENAI_API_KEY')
+        # Use Azure OpenAI like other agents
+        from config import AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+        
+        self.llm = AsyncAzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_version=AZURE_OPENAI_API_VERSION,
         )
+        self.deployment_name = AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
         self.system_message = "You are an enhanced Calendar Agent with coordination capabilities. Schedule meetings, manage attendees, and collaborate with email and notes agents."
-        self.model = "gpt-4"
+        self.model = self.deployment_name
 
     async def process_request(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Process calendar requests with enhanced collaboration"""
         user_message = state["user_request"]
         context = state.get("context", {})
+        conversation_history = state.get("conversation_history", [])
 
         # Check if this is from email agent collaboration
         email_context = context.get("email_agent", {})
@@ -49,9 +56,11 @@ class EnhancedCalendarAgent:
             }
 
         # Regular calendar processing with AI enhancement
+        history_text = "\n".join(conversation_history) if conversation_history else "No previous conversation."
         extraction_prompt = f"""
         Extract meeting details from: '{user_message}'
-        Context: {context}
+        Context from other agents: {context}
+        Recent conversation history: {history_text}
 
         Return JSON with:
         {{
@@ -62,7 +71,7 @@ class EnhancedCalendarAgent:
         }}
         """
 
-        response = self.llm.chat.completions.create(
+        response = await self.llm.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": self.system_message},

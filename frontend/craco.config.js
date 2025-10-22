@@ -43,4 +43,10 @@ module.exports = {
       return webpackConfig;
     },
   },
+  devServer: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'unsafe-none',
+      'Cross-Origin-Embedder-Policy': 'unsafe-none',
+    },
+  },
 };

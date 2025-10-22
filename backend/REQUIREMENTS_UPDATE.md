@@ -187,7 +187,7 @@ AZURE_OPENAI_CHAT_DEPLOYMENT_NAME=your-deployment-name
 JWT_SECRET=your-secret-key
 
 # CORS
-CORS_ORIGINS=http://localhost:3000
+CORS_ORIGINS=http://localhost:5000
 ```
 
 ---

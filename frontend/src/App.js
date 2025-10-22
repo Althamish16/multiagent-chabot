@@ -6,8 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
-import { AuthProvider, useAuth } from "@/components/AuthProvider";
-import { LoginButton } from "@/components/LoginButton";
+import { AuthProvider, useAuth } from "@/components/AuthProvider_new";
+import { LoginButton } from "@/components/LoginButton_new";
 import axios from "axios";
 import { 
   Send, 
@@ -33,6 +33,91 @@ const API = `${BACKEND_URL}/api`;
 function ChatInterface() {
   const { user, isAuthenticated, loading } = useAuth();
   
+  const [messages, setMessages] = useState([]);
+  const [inputMessage, setInputMessage] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [currentAgent, setCurrentAgent] = useState(null);
+  const [processingStep, setProcessingStep] = useState("");
+  const [sessionId] = useState(`session-${Date.now()}`);
+  const [workflowType, setWorkflowType] = useState(null);
+  const [agentsInvolved, setAgentsInvolved] = useState([]);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingMessageId, setStreamingMessageId] = useState(null);
+  const [useStreaming, setUseStreaming] = useState(false); // Streaming disabled - using normal messages
+  const messagesEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  const loadChatHistory = async () => {
+    // Only load chat history if authenticated
+    if (!isAuthenticated) {
+      return;
+    }
+    
+    try {
+      const token = localStorage.getItem('auth_token');
+      const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+      const response = await axios.get(`${API}/chat/${sessionId}`, { headers });
+      if (response.data && response.data.length > 0) {
+        setMessages(response.data);
+      }
+    } catch (error) {
+      // Don't show error to user if it's just a 401/403 (not authenticated)
+      if (error.response?.status !== 401 && error.response?.status !== 403) {
+        console.error("Failed to load chat history:", error);
+      }
+    }
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  useEffect(() => {
+    // Load chat history when authenticated
+    if (isAuthenticated) {
+      loadChatHistory();
+    }
+    // Add enhanced welcome message
+    const welcomeMessage = isAuthenticated 
+      ? `🚀 Welcome back, ${user?.name}! Your Enhanced AI Agents are ready with advanced collaboration capabilities!
+
+🔗 **Multi-Agent Collaboration Features:**
+
+📧 **Smart Email Agent** - Send emails with meeting invites and smart routing
+📅 **Intelligent Calendar Agent** - Advanced scheduling with attendee management
+📝 **Enhanced Notes Agent** - AI categorization with cross-referencing
+📄 **Advanced File Analyzer** - Deep insights with workflow recommendations
+
+🎯 **Enhanced Features:**
+• **Conversation Memory** - Remembers context across messages
+• **Smart Agent Routing** - Automatically selects the best agent for your task
+• **Collaborative Workflows** - Multiple agents work together seamlessly
+• **Real-time Streaming** - See responses as they're generated
+
+💡 **Try asking:**
+• "Schedule a meeting with john@example.com about the project"
+• "Send an email to the team about the new requirements"
+• "Take notes about our discussion and categorize them"
+• "Analyze this document and create a summary"
+
+Ready to assist! 🤖`
+      : `Welcome to the Enhanced AI Agents POC! Please sign in to access all features.`;
+
+    if (messages.length === 0) {
+      setMessages([{
+        id: "welcome",
+        message: welcomeMessage,
+        sender: "agent",
+        timestamp: new Date().toISOString(),
+        agent_type: "system"
+      }]);
+    }
+  }, [isAuthenticated, user, messages.length]);
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 flex items-center justify-center">
@@ -62,106 +147,9 @@ function ChatInterface() {
     );
   }
 
-  const [messages, setMessages] = useState([]);
-  const [inputMessage, setInputMessage] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
-  const [currentAgent, setCurrentAgent] = useState(null);
-  const [processingStep, setProcessingStep] = useState("");
-  const [sessionId] = useState(`session-${Date.now()}`);
-  const [workflowType, setWorkflowType] = useState(null);
-  const [agentsInvolved, setAgentsInvolved] = useState([]);
-  const messagesEndRef = useRef(null);
-  const fileInputRef = useRef(null);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
-
-  useEffect(() => {
-    // Load chat history on mount
-    loadChatHistory();
-    // Add enhanced welcome message
-    const welcomeMessage = isAuthenticated 
-      ? `🚀 Welcome back, ${user?.name}! Your Enhanced AI Agents are ready with advanced collaboration capabilities!
-
-🔗 **Multi-Agent Collaboration Features:**
-
-📧 **Smart Email Agent** - Send emails with meeting invites and smart routing
-📅 **Intelligent Calendar Agent** - Advanced scheduling with attendee management
-📝 **Enhanced Notes Agent** - AI categorization with cross-referencing
-📄 **Advanced File Analyzer** - Deep insights with workflow recommendations
-
-⚡ **Enhanced Workflows Available:**
-• "Schedule a meeting with John about project review and send him an invite"
-• "Analyze this document and save the key points to my notes"
-• "Create a team meeting, invite everyone, and prepare meeting notes"
-• "Process this file, email the summary to stakeholders, and schedule follow-up"
-
-🤖 **LangGraph-Powered Orchestration** - Your agents now work together seamlessly!
-
-What enhanced workflow would you like to start today?`
-      : `🤖 Hello! I'm your AI Agents assistant. I can help you with:
-
-📧 **Email** - Send emails to anyone
-📅 **Calendar** - Manage your schedule and events
-📄 **File Summarization** - Analyze and summarize documents
-📝 **Notes** - Take and organize your notes
-
-💡 **Try saying:**
-• "Send an email to john@company.com about the meeting"
-• "What's on my calendar today?"
-• "Take a note about project deadlines"
-• Upload a document for analysis
-
-🚀 **Sign in for Enhanced Features:**
-• Multi-agent collaboration workflows
-• Advanced LangGraph orchestration
-• Intelligent task automation
-• Personalized AI assistance
-
-What would you like to do?`;
-    
-    setMessages([{
-      id: "welcome",
-      message: welcomeMessage,
-      sender: "agent",
-      agent_type: isAuthenticated ? "enhanced_orchestrator" : "general",
-      timestamp: new Date().toISOString(),
-      enhanced: isAuthenticated
-    }]);
-
-    // Add keyboard shortcuts
-    const handleKeyDown = (e) => {
-      if (e.ctrlKey && e.key === '/') {
-        e.preventDefault();
-        const shortcuts = isAuthenticated 
-          ? '🚀 Enhanced Keyboard Shortcuts:\n\n• Enter: Send message\n• Ctrl+U: Upload file\n• Ctrl+E: Quick email with collaboration\n• Ctrl+C: Smart calendar management\n• Ctrl+N: Enhanced note taking\n• Ctrl+W: Multi-agent workflows'
-          : '🚀 Keyboard Shortcuts:\n\n• Enter: Send message\n• Ctrl+U: Upload file\n• Ctrl+E: Quick email\n• Ctrl+C: Check calendar\n• Ctrl+N: Take note';
-        alert(shortcuts);
-      }
-      if (e.ctrlKey && e.key === 'u') {
-        e.preventDefault();
-        fileInputRef.current?.click();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isAuthenticated, user]);
-
-  const loadChatHistory = async () => {
-    try {
-      const response = await axios.get(`${API}/chat/${sessionId}`);
-      if (response.data && response.data.length > 0) {
-        setMessages(response.data);
-      }
-    } catch (error) {
-      console.error("Error loading chat history:", error);
-    }
+  const sendStreamingMessage = async () => {
+    // Streaming disabled - using normal message sending instead
+    return sendMessage();
   };
 
   const sendMessage = async () => {
@@ -584,7 +572,11 @@ What would you like to do?`;
                           </div>
                         )}
                         <div className="whitespace-pre-wrap text-sm leading-relaxed">
-                          {msg.message}
+                          {msg.html_response ? (
+                            <div dangerouslySetInnerHTML={{ __html: msg.html_response }} />
+                          ) : (
+                            msg.message
+                          )}
                         </div>
                         <div className={`text-xs mt-2 opacity-60 flex items-center justify-between`}>
                           <span>{new Date(msg.timestamp).toLocaleTimeString()}</span>
@@ -672,7 +664,7 @@ What would you like to do?`;
                   <Input
                     value={inputMessage}
                     onChange={(e) => setInputMessage(e.target.value)}
-                    onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
+                    onKeyPress={(e) => e.key === "Enter" && !e.shiftKey && (useStreaming ? sendStreamingMessage() : sendMessage())}
                     placeholder={isAuthenticated 
                       ? "Ask your enhanced AI agents for multi-agent collaboration..."
                       : "Ask your AI agents to help with emails, calendar, files, or notes..."
@@ -682,12 +674,12 @@ What would you like to do?`;
                         ? 'focus:ring-2 focus:ring-purple-500'
                         : 'focus:ring-2 focus:ring-blue-500'
                     }`}
-                    disabled={isLoading}
+                    disabled={isLoading || isStreaming}
                   />
                   
                   <Button
-                    onClick={sendMessage}
-                    disabled={!inputMessage.trim() || isLoading}
+                    onClick={useStreaming ? sendStreamingMessage : sendMessage}
+                    disabled={!inputMessage.trim() || isLoading || isStreaming}
                     className={`flex-shrink-0 transition-all duration-200 shadow-lg hover:shadow-xl ${
                       isAuthenticated 
                         ? 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700'
@@ -698,12 +690,15 @@ What would you like to do?`;
                   </Button>
                 </div>
                 <div className="flex justify-between items-center mt-2">
-                  <p className="text-xs text-slate-500">
-                    {isAuthenticated 
-                      ? 'Enhanced features active • Multi-agent workflows • Press Ctrl+/ for shortcuts'
-                      : 'Upload documents • Press Enter to send • Ctrl+/ for shortcuts • Sign in for enhanced features'
-                    }
-                  </p>
+                  <div className="flex items-center space-x-3">
+                    <p className="text-xs text-slate-500">
+                      {isAuthenticated 
+                        ? 'Enhanced features active • Multi-agent workflows • Press Ctrl+/ for shortcuts'
+                        : 'Upload documents • Press Enter to send • Ctrl+/ for shortcuts • Sign in for enhanced features'
+                      }
+                    </p>
+                    {/* Streaming toggle hidden - using regular mode only */}
+                  </div>
                   {isLoading && (
                     <div className={`text-xs font-medium ${
                       isAuthenticated ? 'text-purple-600' : 'text-blue-600'

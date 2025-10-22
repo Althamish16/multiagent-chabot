@@ -3,29 +3,31 @@ Enhanced Multi-Agent Orchestrator for collaborative workflows
 """
 from typing import Dict, Any
 
-from .email_agent import EnhancedEmailAgent
-from .calendar_agent import EnhancedCalendarAgent
-from .notes_agent import EnhancedNotesAgent
-from .file_summarizer_agent import EnhancedFileSummarizerAgent
+from email_agent import SecureEmailAgent
+from calendar_agent import EnhancedCalendarAgent
+from notes_agent import EnhancedNotesAgent
+from file_summarizer_agent import EnhancedFileSummarizerAgent
 
 
 class MultiAgentOrchestrator:
     def __init__(self):
-        self.email_agent = EnhancedEmailAgent()
+        self.email_agent = SecureEmailAgent()
         self.calendar_agent = EnhancedCalendarAgent()
         self.notes_agent = EnhancedNotesAgent()
         self.file_agent = EnhancedFileSummarizerAgent()
 
     async def route_request(self, user_request: str) -> Dict[str, Any]:
         """Enhanced routing with multi-agent workflow detection"""
+        import logging
         message = user_request.lower()
+        logging.info(f"Routing message: '{message}'")
 
         # Multi-agent workflow detection
         if any(word in message for word in ["meeting", "schedule", "invite"]) and any(word in message for word in ["email", "send", "notify"]):
             return {"workflow_type": "meeting_coordination", "agents": ["email", "calendar", "notes"]}
         elif any(word in message for word in ["document", "file", "analyze"]) and any(word in message for word in ["summarize", "notes", "save"]):
             return {"workflow_type": "document_workflow", "agents": ["file", "notes"]}
-        elif any(word in message for word in ["email"]):
+        elif any(word in message for word in ["email", "mail"]):
             return {"workflow_type": "email_task", "agents": ["email"]}
         elif any(word in message for word in ["calendar", "schedule"]):
             return {"workflow_type": "calendar_task", "agents": ["calendar"]}
@@ -119,11 +121,14 @@ class MultiAgentOrchestrator:
 
     async def process_request(self, user_request: str, session_id: str) -> Dict[str, Any]:
         """Process user request through enhanced multi-agent workflow"""
+        import logging
+        logging.info(f"Processing request: '{user_request}' for session {session_id}")
 
         try:
             # Route the request
             routing_info = await self.route_request(user_request)
             workflow_type = routing_info["workflow_type"]
+            logging.info(f"Routed to workflow: {workflow_type}")
 
             # Execute appropriate workflow
             if workflow_type == "meeting_coordination":

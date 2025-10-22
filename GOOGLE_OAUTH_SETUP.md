@@ -61,7 +61,7 @@ GOOGLE_REDIRECT_URI=http://localhost:5000/auth/google/callback
 
 1. Start your backend: `cd backend && python server.py`
 2. Start your frontend: `cd frontend && npm start`
-3. Visit `http://localhost:3000`
+3. Visit `http://localhost:5000`
 4. Click "Sign in with Google"
 
 ## ✅ Success Indicators

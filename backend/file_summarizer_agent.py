@@ -4,21 +4,28 @@ Enhanced File Summarizer Agent with intelligent analysis and workflow integratio
 import json
 import os
 from typing import Dict, Any
-from openai import OpenAI
+from openai import AsyncAzureOpenAI
 
 
 class EnhancedFileSummarizerAgent:
     def __init__(self):
-        self.llm = OpenAI(
-            api_key=os.environ.get('OPENAI_API_KEY')
+        # Use Azure OpenAI like other agents
+        from config import AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+        
+        self.llm = AsyncAzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_version=AZURE_OPENAI_API_VERSION,
         )
+        self.deployment_name = AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
         self.system_message = "You are an enhanced File Summarizer Agent with intelligent analysis and workflow integration. Extract key insights, action items, and coordinate with other agents for follow-up actions."
-        self.model = "gpt-4"
+        self.model = self.deployment_name
 
     async def process_request(self, state: Dict[str, Any], file_content: str = None) -> Dict[str, Any]:
         """Process files with enhanced analysis and collaboration"""
         user_message = state["user_request"]
         context = state.get("context", {})
+        conversation_history = state.get("conversation_history", [])
 
         if not file_content:
             return {
@@ -27,12 +34,16 @@ class EnhancedFileSummarizerAgent:
                 "collaboration_data": {}
             }
 
+        history_text = "\n".join(conversation_history) if conversation_history else "No previous conversation."
         analysis_prompt = f"""
         Perform comprehensive analysis of this document:
 
         Content: {file_content}
         User Request: {user_message}
-        Context: {context}
+        Context from other agents: {context}
+        Recent conversation history: {history_text}
+
+        Consider the conversation context when analyzing the document - it might provide additional context about what the user wants to focus on or how this document relates to previous discussions.
 
         Provide detailed JSON response with:
         {{
@@ -49,7 +60,7 @@ class EnhancedFileSummarizerAgent:
         }}
         """
 
-        response = self.llm.chat.completions.create(
+        response = await self.llm.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": self.system_message},

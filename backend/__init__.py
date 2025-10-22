@@ -4,8 +4,8 @@ Multi-Agent Chatbot Backend Package
 
 from .enhanced_agents import (
     AgentState,
-    MultiAgentOrchestrator,
-    EnhancedEmailAgent,
+    DynamicMultiAgentOrchestrator,
+    SecureEmailAgent,
     EnhancedCalendarAgent,
     EnhancedNotesAgent,
     EnhancedFileSummarizerAgent,
@@ -14,8 +14,8 @@ from .enhanced_agents import (
 
 __all__ = [
     "AgentState",
-    "MultiAgentOrchestrator",
-    "EnhancedEmailAgent",
+    "DynamicMultiAgentOrchestrator",
+    "SecureEmailAgent",
     "EnhancedCalendarAgent",
     "EnhancedNotesAgent",
     "EnhancedFileSummarizerAgent",

@@ -21,7 +21,7 @@ else:
 DEFAULT_CONFIG = {
     'MONGO_URL': '',  # Empty = in-memory storage for POC
     'DB_NAME': 'multiagent_chabot_poc',
-    'CORS_ORIGINS': 'http://localhost:3000',
+    'CORS_ORIGINS': 'http://localhost:5000',
     'ENV': 'development',
     'DEBUG': 'true',
     'LOG_LEVEL': 'INFO'
@@ -66,7 +66,7 @@ if not HAS_GOOGLE_CONFIG:
 # Database check
 USE_DATABASE = bool(MONGO_URL and MONGO_URL.strip())
 if not USE_DATABASE:
-    print("✅ POC Mode: Using in-memory storage (no MongoDB needed)")
+    print("✅ POC Mode: Using JSON file storage (no MongoDB needed)")
 
 # Logging configuration
 LOG_LEVEL = get_config_value('LOG_LEVEL', 'INFO')
@@ -77,7 +77,7 @@ logging.basicConfig(
 
 # Print configuration summary
 print("\n🔧 POC Configuration Summary:")
-print(f"   Storage: {'Database (' + MONGO_URL + ')' if USE_DATABASE else 'In-Memory (POC Mode)'}")
+print(f"   Storage: {'Database (' + MONGO_URL + ')' if USE_DATABASE else 'JSON Files (POC Mode)'}")
 print(f"   AI Responses: {'Real LLM' if HAS_LLM_KEYS else 'Demo Mode'}")
 print(f"   Authentication: {'Google OAuth' if HAS_GOOGLE_CONFIG else 'Demo Mode'}")
 print(f"   CORS Origins: {CORS_ORIGINS}")
@@ -104,7 +104,7 @@ if not env_file.exists():
         f.write("AZURE_CLIENT_ID=\n")
         f.write("AZURE_CLIENT_SECRET=\n")
         f.write("AZURE_TENANT_ID=\n")
-        f.write("AZURE_REDIRECT_URI=http://localhost:3000/auth/callback\n\n")
+        f.write("AZURE_REDIRECT_URI=http://localhost:5000/auth/callback\n\n")
         f.write("# Development Settings\n")
         f.write("ENV=development\n")
         f.write("DEBUG=true\n")
@@ -112,6 +112,6 @@ if not env_file.exists():
         f.write("# POC Instructions:\n")
         f.write("# This configuration runs in full demo mode - no setup required!\n")
         f.write("# For production features, add your API keys above\n")
-    
+
     print(f"✅ Created POC-ready .env file at {env_file}")
     print("🎉 Ready to run! No additional configuration needed for POC")

@@ -14,120 +14,156 @@ export const useAuth = () => {
 export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [token, setToken] = useState(localStorage.getItem('auth_token'));
+    const [error, setError] = useState(null);
 
     const BACKEND_URL = 'http://localhost:5000';
-    const API = `${BACKEND_URL}/api`;
+    const API_BASE = `${BACKEND_URL}/api`;
 
+    // Configure axios defaults
+    const getAuthHeaders = () => {
+        const token = localStorage.getItem('auth_token');
+        return token ? { 'Authorization': `Bearer ${token}` } : {};
+    };
+
+    // Verify token and get user on mount
     useEffect(() => {
+        // Check for auth data in URL hash (from OAuth callback)
+        const hash = window.location.hash;
+        if (hash.startsWith('#auth-success=')) {
+            try {
+                const dataStr = decodeURIComponent(hash.substring(14));
+                const authData = JSON.parse(dataStr);
+                
+                // Store auth data
+                localStorage.setItem('auth_token', authData.access_token);
+                localStorage.setItem('session_id', authData.session_id);
+                
+                // Set user
+                setUser(authData.user_profile);
+                setError(null);
+                
+                // Clean up hash
+                window.location.hash = '';
+                
+                setLoading(false);
+                return;
+            } catch (err) {
+                console.error('Failed to parse auth data from URL:', err);
+                setError('Authentication failed - invalid data');
+            }
+        } else if (hash.startsWith('#auth-error=')) {
+            try {
+                const errorMsg = decodeURIComponent(hash.substring(12));
+                setError(errorMsg);
+                window.location.hash = '';
+            } catch (err) {
+                console.error('Failed to parse error from URL:', err);
+            }
+        }
+
+        const token = localStorage.getItem('auth_token');
         if (token) {
-            // Set default authorization header
-            axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-            // Verify token and get user info
-            getCurrentUser();
+            // If we have token, verify with backend
+            verifyAndLoadUser();
         } else {
             setLoading(false);
         }
-    }, [token]);
+    }, []);
 
-    const getCurrentUser = async () => {
+    const verifyAndLoadUser = async () => {
         try {
-            const response = await axios.get(`${API}/auth/me`);
+            const response = await axios.get(`${API_BASE}/auth/me`, {
+                headers: getAuthHeaders()
+            });
             setUser(response.data);
-        } catch (error) {
-            console.error('Failed to get current user:', error);
-            // Token might be invalid, remove it
-            logout();
+            setError(null);
+        } catch (err) {
+            console.error('Token verification failed:', err);
+            // Token invalid, clear it
+            handleLogout();
         } finally {
             setLoading(false);
         }
     };
 
-    const login = async () => {
-        try {
-            const response = await axios.get(`${API}/auth/login`);
-            const { auth_url } = response.data;
-            
-            // Open Google OAuth in popup
-            const popup = window.open(
-                auth_url,
-                'google-oauth',
-                'width=500,height=600,scrollbars=yes,resizable=yes'
-            );
-
-            return new Promise((resolve, reject) => {
-                // Listen for messages from the popup
-                const handleMessage = (event) => {
-                    // Verify origin for security (in production, check against your domain)
-                    if (event.data.type === 'auth-success') {
-                        window.removeEventListener('message', handleMessage);
-                        clearInterval(checkClosed);
-                        
-                        // Store the token and user data
-                        localStorage.setItem('auth_token', event.data.access_token);
-                        setToken(event.data.access_token);
-                        setUser(event.data.user_profile);
-                        
-                        resolve(true);
-                    } else if (event.data.type === 'auth-error') {
-                        window.removeEventListener('message', handleMessage);
-                        clearInterval(checkClosed);
-                        reject(new Error(event.data.error));
-                    }
-                };
-
-                // Listen for the popup to complete
-                const checkClosed = setInterval(() => {
-                    if (popup.closed) {
-                        clearInterval(checkClosed);
-                        window.removeEventListener('message', handleMessage);
-                        reject(new Error('Popup was closed before authentication completed'));
-                    }
-                }, 1000);
-
-                window.addEventListener('message', handleMessage);
+    const handleLogin = () => {
+        // Get authorization URL from backend
+        axios.get(`${API_BASE}/auth/login`)
+            .then(response => {
+                const { auth_url, state } = response.data;
+                
+                // Store state for validation (optional but recommended)
+                sessionStorage.setItem('oauth_state', state);
+                
+                // Redirect to OAuth
+                window.location.href = auth_url;
+            })
+            .catch(err => {
+                console.error('Login failed:', err);
+                const errorMsg = err.response?.data?.detail || err.message || 'Login failed';
+                setError(errorMsg);
             });
-        } catch (error) {
-            console.error('Login failed:', error);
-            throw error;
+    };
+
+    const handleLogout = () => {
+        // Clear local storage
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('session_id');
+        sessionStorage.removeItem('oauth_state');
+        
+        // Clear state
+        setUser(null);
+        setError(null);
+        
+        // Notify backend (optional, fire and forget)
+        const sessionId = localStorage.getItem('session_id');
+        if (sessionId) {
+            axios.post(`${API_BASE}/auth/logout`, { session_id: sessionId })
+                .catch(err => console.error('Logout notification failed:', err));
         }
     };
 
-    const logout = () => {
-        localStorage.removeItem('auth_token');
-        setToken(null);
-        setUser(null);
-        delete axios.defaults.headers.common['Authorization'];
-    };
-
-    const handleAuthCallback = async (code) => {
+    const handleAuthCallback = async (code, state) => {
         try {
-            const response = await axios.post(`${API}/auth/callback`, {
-                code,
-                redirect_uri: window.location.origin + '/auth/google/callback'
+            // Verify state (optional but recommended)
+            const storedState = sessionStorage.getItem('oauth_state');
+            if (storedState && storedState !== state) {
+                throw new Error('State mismatch - possible CSRF attack');
+            }
+
+            // Exchange code for tokens
+            const response = await axios.post(`${API_BASE}/auth/callback`, {
+                code: code,
+                redirect_uri: `${window.location.origin}/auth/google/callback`
             });
-            
-            const { access_token, user_profile } = response.data;
-            
+
+            const { access_token, user_profile, session_id } = response.data;
+
+            // Store auth data
             localStorage.setItem('auth_token', access_token);
-            setToken(access_token);
-            setUser(user_profile);
+            localStorage.setItem('session_id', session_id);
             
-            return true;
-        } catch (error) {
-            console.error('Auth callback failed:', error);
-            throw error;
+            setUser(user_profile);
+            setError(null);
+
+            return { access_token, user_profile, session_id };
+        } catch (err) {
+            console.error('Auth callback failed:', err);
+            const errorMsg = err.response?.data?.detail || err.message || 'Authentication failed';
+            setError(errorMsg);
+            throw new Error(errorMsg);
         }
     };
 
     const value = {
         user,
         loading,
+        error,
         isAuthenticated: !!user,
-        login,
-        logout,
+        login: handleLogin,
+        logout: handleLogout,
         handleAuthCallback,
-        token
+        getAuthHeaders
     };
 
     return (
