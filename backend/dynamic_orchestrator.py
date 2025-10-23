@@ -10,6 +10,7 @@ from langchain_core.output_parsers import JsonOutputParser
 from calendar_agent import EnhancedCalendarAgent
 from notes_agent import EnhancedNotesAgent
 from file_summarizer_agent import EnhancedFileSummarizerAgent
+from email_agent import EnhancedEmailAgent
 from config import (
     AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
 )
@@ -44,6 +45,7 @@ class DynamicMultiAgentOrchestrator:
         self.calendar_agent = EnhancedCalendarAgent()
         self.notes_agent = EnhancedNotesAgent()
         self.file_agent = EnhancedFileSummarizerAgent()
+        self.email_agent = EnhancedEmailAgent()
 
         # Build the LangGraph
         self.graph = self._build_graph()
@@ -58,6 +60,7 @@ class DynamicMultiAgentOrchestrator:
         workflow.add_node("execute_calendar_agent", self._execute_calendar_agent)
         workflow.add_node("execute_notes_agent", self._execute_notes_agent)
         workflow.add_node("execute_file_agent", self._execute_file_agent)
+        workflow.add_node("execute_email_agent", self._execute_email_agent)
         workflow.add_node("compile_response", self._compile_response)
 
         # Define the flow
@@ -94,7 +97,16 @@ class DynamicMultiAgentOrchestrator:
             }
         )
 
-        workflow.add_edge("execute_file_agent", "compile_response")
+        workflow.add_conditional_edges(
+            "execute_file_agent",
+            self._should_execute_email,
+            {
+                True: "execute_email_agent",
+                False: "compile_response"
+            }
+        )
+
+        workflow.add_edge("execute_email_agent", "compile_response")
         workflow.add_edge("compile_response", END)
 
         return workflow.compile()
@@ -122,6 +134,15 @@ class DynamicMultiAgentOrchestrator:
         - calendar_agent: For scheduling meetings, calendar management, time coordination
         - notes_agent: For taking notes, saving information, note management
         - file_agent: For analyzing documents, summarizing files, content extraction
+        - email_agent: For drafting/sending emails, reading inbox, fetching specific emails, listing unread messages
+
+        Examples:
+        - "Get my latest emails" → email_agent (read inbox)
+        - "Show unread messages" → email_agent (list unread)
+        - "Draft email to John" → email_agent (draft)
+        - "What emails did I receive today" → email_agent (read inbox)
+        - "Read my mail" → email_agent (read inbox)
+        - "Check my inbox" → email_agent (read inbox)
 
         Conversation History:
         {conversation_history}
@@ -136,6 +157,7 @@ class DynamicMultiAgentOrchestrator:
         }}
 
         Only include agents that are clearly needed based on the request and conversation context.
+        If the user asks about emails, mail, inbox, or messages, ALWAYS include email_agent.
         """)
 
         conversation_text = "\n".join(state["conversation_history"]) if state["conversation_history"] else "No previous conversation."
@@ -147,7 +169,17 @@ class DynamicMultiAgentOrchestrator:
 
         state["analysis_result"] = result
         state["agents_to_invoke"] = result.get("agents_to_invoke", [])
+        
+        # Fallback: If user mentions email-related keywords and email_agent not included, add it
+        user_request_lower = state["user_request"].lower()
+        email_keywords = ["email", "mail", "inbox", "message", "unread", "gmail", "latest email", "recent email"]
+        if any(keyword in user_request_lower for keyword in email_keywords):
+            if "email_agent" not in state["agents_to_invoke"]:
+                state["agents_to_invoke"].insert(0, "email_agent")
+                logging.info(f"Fallback triggered: Added email_agent due to keywords in request")
+        
         logging.info(f"Analysis complete: {result}")
+        logging.info(f"Final agents to invoke: {state['agents_to_invoke']}")
 
         return state
 
@@ -170,6 +202,10 @@ class DynamicMultiAgentOrchestrator:
     def _should_execute_file(self, state: OrchestratorState) -> bool:
         """Check if file agent should be executed"""
         return "file_agent" in state["agents_to_invoke"] and state["current_agent"] == "file_agent"
+
+    def _should_execute_email(self, state: OrchestratorState) -> bool:
+        """Check if email agent should be executed"""
+        return "email_agent" in state["agents_to_invoke"] and state["current_agent"] == "email_agent"
 
     async def _execute_calendar_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the calendar agent"""
@@ -227,6 +263,29 @@ class DynamicMultiAgentOrchestrator:
 
         result = await self.file_agent.process_request(agent_state, state.get("file_content"))
         state["agent_results"]["file_agent"] = result
+
+        # Move to next agent
+        current_index = state["agents_to_invoke"].index("file_agent")
+        if current_index + 1 < len(state["agents_to_invoke"]):
+            state["current_agent"] = state["agents_to_invoke"][current_index + 1]
+        else:
+            state["workflow_complete"] = True
+
+        return state
+
+    async def _execute_email_agent(self, state: OrchestratorState) -> OrchestratorState:
+        """Execute the email agent"""
+        logging.info("Executing email agent")
+        agent_state = {
+            "user_request": state["user_request"],
+            "session_id": state["session_id"],
+            "access_token": state.get("access_token"),
+            "conversation_history": state.get("conversation_history", []),
+            "context": state.get("agent_results", {}),
+        }
+
+        result = await self.email_agent.process_request(agent_state)
+        state["agent_results"]["email_agent"] = result
         state["workflow_complete"] = True
 
         return state

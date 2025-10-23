@@ -12,12 +12,22 @@ export const useAuth = () => {
 };
 
 export const AuthProvider = ({ children }) => {
-    const [user, setUser] = useState(null);
+    const [user, setUserState] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
     const BACKEND_URL = 'http://localhost:5000';
     const API_BASE = `${BACKEND_URL}/api`;
+
+    // Custom setUser that also saves to localStorage
+    const setUser = (userData) => {
+        setUserState(userData);
+        if (userData) {
+            localStorage.setItem('user_profile', JSON.stringify(userData));
+        } else {
+            localStorage.removeItem('user_profile');
+        }
+    };
 
     // Configure axios defaults
     const getAuthHeaders = () => {
@@ -63,7 +73,16 @@ export const AuthProvider = ({ children }) => {
 
         const token = localStorage.getItem('auth_token');
         if (token) {
-            // If we have token, verify with backend
+            // Load user from localStorage if available
+            const storedUser = localStorage.getItem('user_profile');
+            if (storedUser) {
+                try {
+                    setUser(JSON.parse(storedUser));
+                } catch (err) {
+                    console.error('Failed to parse stored user:', err);
+                }
+            }
+            // Verify with backend in background
             verifyAndLoadUser();
         } else {
             setLoading(false);
@@ -109,6 +128,7 @@ export const AuthProvider = ({ children }) => {
         // Clear local storage
         localStorage.removeItem('auth_token');
         localStorage.removeItem('session_id');
+        localStorage.removeItem('user_profile');
         sessionStorage.removeItem('oauth_state');
         
         // Clear state

@@ -1,0 +1,129 @@
+### Email Agent API Testing
+### Use REST Client extension in VS Code to test these endpoints
+
+# Variables (update with your actual values)
+@baseUrl = http://localhost:5000
+@token = YOUR_JWT_TOKEN_HERE
+
+### ==================================
+### 1. Test Server Status
+### ==================================
+GET {{baseUrl}}/api/
+Accept: application/json
+
+### ==================================
+### 2. Get Inbox Emails (Requires Auth)
+### ==================================
+GET {{baseUrl}}/api/email/inbox?max_results=10
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### Get Inbox with Query Filter
+GET {{baseUrl}}/api/email/inbox?max_results=20&query=is:unread
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### ==================================
+### 3. Get Specific Email Message
+### ==================================
+GET {{baseUrl}}/api/email/message/YOUR_MESSAGE_ID_HERE
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### ==================================
+### 4. Draft Email
+### ==================================
+POST {{baseUrl}}/api/email/draft
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "user_request": "Draft an email to john@example.com about tomorrow's meeting",
+  "session_id": "test_session_123",
+  "recipient": "john@example.com",
+  "subject": "Tomorrow's Meeting",
+  "tone": "professional",
+  "priority": "high"
+}
+
+### ==================================
+### 5. List Drafts for Session
+### ==================================
+GET {{baseUrl}}/api/email/drafts/test_session_123
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### ==================================
+### 6. Get Specific Draft
+### ==================================
+GET {{baseUrl}}/api/email/draft/DRAFT_ID_HERE
+Authorization: Bearer {{token}}
+Accept: application/json
+
+### ==================================
+### 7. Approve Draft
+### ==================================
+POST {{baseUrl}}/api/email/approve
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "draft_id": "DRAFT_ID_HERE",
+  "feedback": "Looks good!",
+  "modifications": null
+}
+
+### ==================================
+### 8. Send Email
+### ==================================
+POST {{baseUrl}}/api/email/send
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "draft_id": "DRAFT_ID_HERE"
+}
+
+### ==================================
+### 9. Delete Draft
+### ==================================
+DELETE {{baseUrl}}/api/email/draft/DRAFT_ID_HERE
+Authorization: Bearer {{token}}
+
+### ==================================
+### 10. Enhanced Chat (Test Email Reading via Chat)
+### ==================================
+POST {{baseUrl}}/api/enhanced-chat
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "message": "Show me my latest emails",
+  "session_id": "test_session_123"
+}
+
+### Test with different queries
+POST {{baseUrl}}/api/enhanced-chat
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "message": "Get my unread emails",
+  "session_id": "test_session_123"
+}
+
+### ==================================
+### 11. Authentication - Get User Info
+### ==================================
+GET {{baseUrl}}/api/auth/me
+Authorization: Bearer {{token}}
+
+### ==================================
+### Notes:
+### ==================================
+# 1. Replace {{token}} with your actual JWT token after signing in
+# 2. Get token from browser: 
+#    - Sign in via http://localhost:5000/auth/login
+#    - Check browser cookies or localStorage for 'auth_token'
+# 3. Click "Send Request" above any ### line to execute
+# 4. Results appear in a new panel to the right

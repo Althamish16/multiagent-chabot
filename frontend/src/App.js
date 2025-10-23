@@ -8,6 +8,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { AuthProvider, useAuth } from "@/components/AuthProvider_new";
 import { LoginButton } from "@/components/LoginButton_new";
+import { EmailDraftCard } from "@/components/EmailDraftCard";
 import axios from "axios";
 import { 
   Send, 
@@ -44,6 +45,7 @@ function ChatInterface() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingMessageId, setStreamingMessageId] = useState(null);
   const [useStreaming, setUseStreaming] = useState(false); // Streaming disabled - using normal messages
+  const [emailDrafts, setEmailDrafts] = useState([]); // Email drafts from agent
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -232,6 +234,30 @@ Ready to assist! 🤖`
       };
 
       setMessages(prev => [...prev, agentMessage]);
+
+      // Check if response contains email draft
+      if (response.data.agent_used === 'email_agent' || 
+          response.data.agent_used === 'enhanced_orchestrator' && 
+          response.data.response.includes('draft_id')) {
+        try {
+          // Try to extract draft info from response
+          const draftMatch = response.data.response.match(/draft_id[:\s]+([a-f0-9-]+)/i);
+          if (draftMatch) {
+            // Fetch full draft details
+            const token = localStorage.getItem('auth_token');
+            const draftResponse = await axios.get(
+              `${API}/email/draft/${draftMatch[1]}`,
+              { headers: { 'Authorization': `Bearer ${token}` } }
+            );
+            
+            if (draftResponse.data) {
+              setEmailDrafts(prev => [...prev, draftResponse.data]);
+            }
+          }
+        } catch (error) {
+          console.log("Could not fetch draft details:", error);
+        }
+      }
     } catch (error) {
       console.error("Error sending message:", error);
       const errorMessage = {
@@ -248,6 +274,109 @@ Ready to assist! 🤖`
       setWorkflowType(null);
       setAgentsInvolved([]);
       setProcessingStep("");
+    }
+  };
+
+  // Email draft handlers
+  const handleApproveDraft = async (draftId) => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await axios.post(
+        `${API}/email/approve`,
+        { draft_id: draftId },
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+
+      // Update draft in state
+      setEmailDrafts(prev => prev.map(d => 
+        d.draft_id === draftId 
+          ? { ...d, status: 'approved' }
+          : d
+      ));
+
+      // Add success message
+      const successMsg = {
+        id: Date.now(),
+        message: `✅ Email draft approved! You can now send it.`,
+        sender: "agent",
+        agent_type: "email_agent",
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, successMsg]);
+    } catch (error) {
+      console.error("Error approving draft:", error);
+      const errorMsg = {
+        id: Date.now(),
+        message: `❌ Failed to approve draft: ${error.response?.data?.detail || error.message}`,
+        sender: "agent",
+        agent_type: "error",
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errorMsg]);
+    }
+  };
+
+  const handleRejectDraft = async (draftId) => {
+    try {
+      // Remove from drafts
+      setEmailDrafts(prev => prev.filter(d => d.draft_id !== draftId));
+
+      const rejectMsg = {
+        id: Date.now(),
+        message: `🗑️ Email draft rejected and discarded.`,
+        sender: "agent",
+        agent_type: "email_agent",
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, rejectMsg]);
+    } catch (error) {
+      console.error("Error rejecting draft:", error);
+    }
+  };
+
+  const handleSendDraft = async (draftId) => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await axios.post(
+        `${API}/email/send`,
+        { draft_id: draftId },
+        { headers: { 'Authorization': `Bearer ${token}` } }
+      );
+
+      if (response.data.status === 'success') {
+        // Update draft status
+        setEmailDrafts(prev => prev.map(d => 
+          d.draft_id === draftId 
+            ? { ...d, status: 'sent' }
+            : d
+        ));
+
+        const successMsg = {
+          id: Date.now(),
+          message: `📧 Email sent successfully to ${response.data.result?.gmail_message_id ? 'Gmail' : 'recipient'}!`,
+          sender: "agent",
+          agent_type: "email_agent",
+          timestamp: new Date().toISOString()
+        };
+        setMessages(prev => [...prev, successMsg]);
+
+        // Remove draft after a delay
+        setTimeout(() => {
+          setEmailDrafts(prev => prev.filter(d => d.draft_id !== draftId));
+        }, 3000);
+      } else {
+        throw new Error(response.data.message || 'Send failed');
+      }
+    } catch (error) {
+      console.error("Error sending email:", error);
+      const errorMsg = {
+        id: Date.now(),
+        message: `❌ Failed to send email: ${error.response?.data?.detail || error.message}`,
+        sender: "agent",
+        agent_type: "error",
+        timestamp: new Date().toISOString()
+      };
+      setMessages(prev => [...prev, errorMsg]);
     }
   };
 
@@ -639,6 +768,28 @@ Ready to assist! 🤖`
                   )}
                   <div ref={messagesEndRef} />
                 </div>
+
+                {/* Email Draft Cards */}
+                {emailDrafts.length > 0 && (
+                  <div className="mt-6 space-y-4 px-4">
+                    <div className="flex items-center space-x-2 mb-3">
+                      <Mail className="w-5 h-5 text-purple-600" />
+                      <h3 className="text-sm font-semibold text-slate-700">
+                        Email Drafts ({emailDrafts.length})
+                      </h3>
+                    </div>
+                    {emailDrafts.map((draft) => (
+                      <EmailDraftCard
+                        key={draft.draft_id || draft.id}
+                        draft={draft}
+                        onApprove={handleApproveDraft}
+                        onReject={handleRejectDraft}
+                        onSend={handleSendDraft}
+                        isAuthenticated={isAuthenticated}
+                      />
+                    ))}
+                  </div>
+                )}
               </ScrollArea>
 
               {/* Enhanced Input Area */}
