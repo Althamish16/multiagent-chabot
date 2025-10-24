@@ -6,6 +6,7 @@ from langgraph.graph import StateGraph, END
 from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
+from datetime import datetime
 
 from calendar_agent import EnhancedCalendarAgent
 from notes_agent import EnhancedNotesAgent
@@ -57,10 +58,8 @@ class DynamicMultiAgentOrchestrator:
         # Add nodes
         workflow.add_node("analyze_request", self._analyze_request)
         workflow.add_node("route_agents", self._route_agents)
-        workflow.add_node("execute_calendar_agent", self._execute_calendar_agent)
-        workflow.add_node("execute_notes_agent", self._execute_notes_agent)
-        workflow.add_node("execute_file_agent", self._execute_file_agent)
-        workflow.add_node("execute_email_agent", self._execute_email_agent)
+        workflow.add_node("execute_agent", self._execute_agent)
+        workflow.add_node("check_next", self._check_next)
         workflow.add_node("compile_response", self._compile_response)
 
         # Define the flow
@@ -68,45 +67,18 @@ class DynamicMultiAgentOrchestrator:
 
         # Add edges
         workflow.add_edge("analyze_request", "route_agents")
+        workflow.add_edge("route_agents", "execute_agent")
+        workflow.add_edge("execute_agent", "check_next")
 
-        # Conditional routing based on agents to invoke
         workflow.add_conditional_edges(
-            "route_agents",
-            self._should_execute_calendar,
+            "check_next",
+            self._should_continue,
             {
-                True: "execute_calendar_agent",
-                False: "compile_response"
+                "continue": "execute_agent",
+                "done": "compile_response"
             }
         )
 
-        workflow.add_conditional_edges(
-            "execute_calendar_agent",
-            self._should_execute_notes,
-            {
-                True: "execute_notes_agent",
-                False: "compile_response"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "execute_notes_agent",
-            self._should_execute_file,
-            {
-                True: "execute_file_agent",
-                False: "compile_response"
-            }
-        )
-
-        workflow.add_conditional_edges(
-            "execute_file_agent",
-            self._should_execute_email,
-            {
-                True: "execute_email_agent",
-                False: "compile_response"
-            }
-        )
-
-        workflow.add_edge("execute_email_agent", "compile_response")
         workflow.add_edge("compile_response", END)
 
         return workflow.compile()
@@ -129,54 +101,92 @@ class DynamicMultiAgentOrchestrator:
             state["conversation_history"] = []
 
         analysis_prompt = ChatPromptTemplate.from_template("""
-        You are an expert AI orchestrator. Analyze this user request and determine which agents should be invoked
-        and in what order. Available agents:
-        - calendar_agent: For scheduling meetings, calendar management, time coordination
-        - notes_agent: For taking notes, saving information, note management
-        - file_agent: For analyzing documents, summarizing files, content extraction
-        - email_agent: For drafting/sending emails, reading inbox, fetching specific emails, listing unread messages
+        You are the Orchestrator for a multi-agent system. Decide which agents to run and in what order based on
+        the current user request and recent conversation.
 
-        Examples:
-        - "Get my latest emails" → email_agent (read inbox)
-        - "Show unread messages" → email_agent (list unread)
-        - "Draft email to John" → email_agent (draft)
-        - "What emails did I receive today" → email_agent (read inbox)
-        - "Read my mail" → email_agent (read inbox)
-        - "Check my inbox" → email_agent (read inbox)
+        Current date: {current_date}
 
-        Conversation History:
+        Available agents (use only what is needed):
+        - calendar_agent — schedule/reschedule/cancel meetings, find availability, list events
+        - notes_agent — create/update/search notes, action items, meeting minutes
+        - file_agent — read/summarize/extract/analyze documents and files
+        - email_agent — read inbox/unread/search, draft/send/reply/forward emails
+
+        Guidance:
+        - Select the minimal set of agents required to satisfy the request.
+        - Order agents so dependencies are satisfied (e.g., file_agent → email_agent to email a summary;
+            email_agent → calendar_agent to schedule from an email; file_agent → notes_agent to capture a summary).
+        - If nothing actionable is required, return an empty list for agents_to_invoke.
+        - Prefer single-agent workflows when possible.
+
+        Output format (STRICT JSON only; no prose, no markdown, no code fences):
+                {{
+                    "agents_to_invoke": ["calendar_agent", "..."],
+                    "reasoning": "one or two sentences explaining the choice",
+                    "workflow_type": "short label like 'email_search' | 'file_summary' | 'schedule_meeting' | 'notes_capture' | 'multi_step' | 'no_action'",
+                    "agent_actions": {{
+                        "email_agent": {{"action": "read_inbox|list_unread|search|draft|send|reply", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
+                        "calendar_agent": {{"action": "create_event|list_events|find_time|reschedule|cancel", "parameters": {{"date": "", "time": "", "duration_min": 0, "attendees": []}}}},
+                        "file_agent": {{"action": "summarize|extract|analyze", "parameters": {{"file_hint": "", "sections": []}}}},
+                        "notes_agent": {{"action": "create|append|search|list", "parameters": {{"title": "", "content": ""}}}}
+                    }},
+                    "confidence": 0.0
+                }}
+
+        Constraints:
+        - agents_to_invoke must only contain these exact values: ["calendar_agent", "notes_agent", "file_agent", "email_agent"].
+        - Do not include agents that are not clearly relevant.
+        - Do not include chain-of-thought. Return ONLY the JSON object.
+
+        Conversation (last messages):
         {conversation_history}
 
-        Current User Request: {user_request}
-
-        Respond with a JSON object containing:
-        {{
-            "agents_to_invoke": ["agent1", "agent2", ...] (in execution order),
-            "reasoning": "brief explanation of why these agents",
-            "workflow_type": "descriptive name for the workflow"
-        }}
-
-        Only include agents that are clearly needed based on the request and conversation context.
-        If the user asks about emails, mail, inbox, or messages, ALWAYS include email_agent.
+        Current user request:
+                {user_request}
         """)
 
         conversation_text = "\n".join(state["conversation_history"]) if state["conversation_history"] else "No previous conversation."
+        current_date = datetime.now().strftime("%Y-%m-%d")
         chain = analysis_prompt | self.llm | JsonOutputParser()
         result = await chain.ainvoke({
             "user_request": state["user_request"],
-            "conversation_history": conversation_text
+            "conversation_history": conversation_text,
+            "current_date": current_date
         })
 
         state["analysis_result"] = result
         state["agents_to_invoke"] = result.get("agents_to_invoke", [])
         
-        # Fallback: If user mentions email-related keywords and email_agent not included, add it
+        # Fallbacks: If user mentions agent-related keywords and agent not included, add it
         user_request_lower = state["user_request"].lower()
-        email_keywords = ["email", "mail", "inbox", "message", "unread", "gmail", "latest email", "recent email"]
-        if any(keyword in user_request_lower for keyword in email_keywords):
-            if "email_agent" not in state["agents_to_invoke"]:
-                state["agents_to_invoke"].insert(0, "email_agent")
-                logging.info(f"Fallback triggered: Added email_agent due to keywords in request")
+        keyword_map = {
+            "email_agent": [
+                "email", "mail", "inbox", "message", "unread", "gmail", "latest email", "recent email",
+                "send email", "draft email", "compose"
+            ],
+            "calendar_agent": [
+                "calendar", "meeting", "schedule", "reschedule", "appointment", "event", "availability",
+                "time slot", "book", "invite"
+            ],
+            "file_agent": [
+                "file", "document", "pdf", "docx", "ppt", "slide", "slides", "summarize", "extract",
+                "analyze", "report"
+            ],
+            "notes_agent": [
+                "note", "notes", "notebook", "remember", "save this", "to-do", "todo", "task list",
+                "minutes"
+            ]
+        }
+
+        detected_agents = []
+        for agent_name, keywords in keyword_map.items():
+            if any(keyword in user_request_lower for keyword in keywords):
+                detected_agents.append(agent_name)
+
+        for agent_name in detected_agents:
+            if agent_name not in state["agents_to_invoke"]:
+                state["agents_to_invoke"].append(agent_name)
+                logging.info(f"Fallback triggered: Added {agent_name} due to keywords in request")
         
         logging.info(f"Analysis complete: {result}")
         logging.info(f"Final agents to invoke: {state['agents_to_invoke']}")
@@ -191,41 +201,53 @@ class DynamicMultiAgentOrchestrator:
             state["workflow_complete"] = True
         return state
 
-    def _should_execute_calendar(self, state: OrchestratorState) -> bool:
-        """Check if calendar agent should be executed"""
-        return "calendar_agent" in state["agents_to_invoke"] and state["current_agent"] == "calendar_agent"
+    async def _execute_agent(self, state: OrchestratorState) -> OrchestratorState:
+        """Execute the current agent"""
+        agent = state["current_agent"]
+        if agent == "calendar_agent":
+            return await self._execute_calendar_agent(state)
+        elif agent == "notes_agent":
+            return await self._execute_notes_agent(state)
+        elif agent == "file_agent":
+            return await self._execute_file_agent(state)
+        elif agent == "email_agent":
+            return await self._execute_email_agent(state)
+        else:
+            # Unknown agent, skip
+            return state
 
-    def _should_execute_notes(self, state: OrchestratorState) -> bool:
-        """Check if notes agent should be executed"""
-        return "notes_agent" in state["agents_to_invoke"] and state["current_agent"] == "notes_agent"
+    async def _check_next(self, state: OrchestratorState) -> OrchestratorState:
+        """Check if there are more agents to execute"""
+        agents = state["agents_to_invoke"]
+        current = state["current_agent"]
+        if current in agents:
+            index = agents.index(current)
+            if index + 1 < len(agents):
+                state["current_agent"] = agents[index + 1]
+            else:
+                state["workflow_complete"] = True
+        else:
+            state["workflow_complete"] = True
+        return state
 
-    def _should_execute_file(self, state: OrchestratorState) -> bool:
-        """Check if file agent should be executed"""
-        return "file_agent" in state["agents_to_invoke"] and state["current_agent"] == "file_agent"
-
-    def _should_execute_email(self, state: OrchestratorState) -> bool:
-        """Check if email agent should be executed"""
-        return "email_agent" in state["agents_to_invoke"] and state["current_agent"] == "email_agent"
+    def _should_continue(self, state: OrchestratorState) -> str:
+        """Determine if to continue executing agents or done"""
+        return "continue" if not state["workflow_complete"] else "done"
 
     async def _execute_calendar_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the calendar agent"""
         logging.info("Executing calendar agent")
         agent_state = {
             "user_request": state["user_request"],
+            "access_token": state.get("access_token"),
             "context": state.get("agent_results", {}),
             "conversation_history": state.get("conversation_history", []),
+            "calendar_parameters": state.get("analysis_result", {}).get("agent_actions", {}).get("calendar_agent", {}),
             "results": {}
         }
 
         result = await self.calendar_agent.process_request(agent_state)
         state["agent_results"]["calendar_agent"] = result
-
-        # Move to next agent
-        current_index = state["agents_to_invoke"].index("calendar_agent")
-        if current_index + 1 < len(state["agents_to_invoke"]):
-            state["current_agent"] = state["agents_to_invoke"][current_index + 1]
-        else:
-            state["workflow_complete"] = True
 
         return state
 
@@ -242,13 +264,6 @@ class DynamicMultiAgentOrchestrator:
         result = await self.notes_agent.process_request(agent_state)
         state["agent_results"]["notes_agent"] = result
 
-        # Move to next agent
-        current_index = state["agents_to_invoke"].index("notes_agent")
-        if current_index + 1 < len(state["agents_to_invoke"]):
-            state["current_agent"] = state["agents_to_invoke"][current_index + 1]
-        else:
-            state["workflow_complete"] = True
-
         return state
 
     async def _execute_file_agent(self, state: OrchestratorState) -> OrchestratorState:
@@ -263,13 +278,6 @@ class DynamicMultiAgentOrchestrator:
 
         result = await self.file_agent.process_request(agent_state, state.get("file_content"))
         state["agent_results"]["file_agent"] = result
-
-        # Move to next agent
-        current_index = state["agents_to_invoke"].index("file_agent")
-        if current_index + 1 < len(state["agents_to_invoke"]):
-            state["current_agent"] = state["agents_to_invoke"][current_index + 1]
-        else:
-            state["workflow_complete"] = True
 
         return state
 
@@ -286,7 +294,6 @@ class DynamicMultiAgentOrchestrator:
 
         result = await self.email_agent.process_request(agent_state)
         state["agent_results"]["email_agent"] = result
-        state["workflow_complete"] = True
 
         return state
 
@@ -297,7 +304,50 @@ class DynamicMultiAgentOrchestrator:
         agent_results = state.get("agent_results", {})
         analysis = state.get("analysis_result", {})
 
-        # Use LLM to compile a coherent response
+        # Special handling for email agent results
+        if "email_agent" in agent_results:
+            email_result = agent_results["email_agent"]
+            if email_result.get("status") == "success":
+                result_data = email_result.get("result", {})
+                email_summaries = result_data.get("email_summaries", [])
+                total_count = result_data.get("total_count", 0)
+                query = result_data.get("query", "")
+
+                if email_summaries:
+                    # Format email data into readable response
+                    response_parts = [f"I found {total_count} email{'s' if total_count != 1 else ''}"]
+                    if query:
+                        response_parts[0] += f" matching '{query}'"
+                    response_parts[0] += ":"
+
+                    for i, email in enumerate(email_summaries[:5], 1):  # Show first 5
+                        from_addr = email.get("from", "Unknown")
+                        subject = email.get("subject", "(No Subject)")
+                        snippet = email.get("snippet", "")[:100]
+                        is_unread = " (unread)" if email.get("is_unread") else ""
+                        response_parts.append(f"{i}. From: {from_addr}")
+                        response_parts.append(f"   Subject: {subject}{is_unread}")
+                        if snippet:
+                            response_parts.append(f"   Preview: {snippet}...")
+                        response_parts.append("")
+
+                    if total_count > 5:
+                        response_parts.append(f"... and {total_count - 5} more emails.")
+
+                    state["final_response"] = "\n".join(response_parts)
+                    return state
+                else:
+                    state["final_response"] = email_result.get("message", "No emails found.")
+                    return state
+            elif email_result.get("status") == "error":
+                error_msg = email_result.get("message", "Failed to retrieve emails")
+                if "Authentication required" in error_msg:
+                    state["final_response"] = "Please sign in with Google to access your emails."
+                else:
+                    state["final_response"] = f"❌ {error_msg}"
+                return state
+
+        # Use LLM to compile a coherent response for other cases
         compile_prompt = ChatPromptTemplate.from_template("""
         You are an expert at synthesizing responses from multiple AI agents. Given the results from various agents
         and the original user request, create a comprehensive, helpful response.

@@ -45,17 +45,18 @@ class EnhancedMockGraphAPI:
         }
 
     @staticmethod
-    async def save_structured_note(title: str, content: str, category: str = "General",
-                                 tags: List[str] = None, related_items: Dict = None):
-        """Enhanced note saving with structured data and relationships"""
+    async def get_calendar_events():
+        """Get calendar events with enhanced details"""
         await asyncio.sleep(0.3)
-        return {
-            "id": f"enhanced-note-{uuid.uuid4()}",
-            "title": title,
-            "content": content,
-            "category": category,
-            "tags": tags or [],
-            "related_items": related_items or {},
-            "created": datetime.now(timezone.utc).isoformat(),
-            "ai_processed": True
-        }
+        return [
+            {
+                "id": f"event-{uuid.uuid4()}",
+                "title": "Sample Meeting",
+                "start": "2024-01-16T10:00:00Z",
+                "end": "2024-01-16T11:00:00Z",
+                "description": "Sample calendar event",
+                "attendees": ["user@example.com"],
+                "meeting_link": f"https://teams.microsoft.com/meet/{uuid.uuid4()}",
+                "status": "confirmed"
+            }
+        ]
