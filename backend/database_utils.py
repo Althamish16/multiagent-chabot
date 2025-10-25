@@ -1,5 +1,6 @@
 """
 Database utilities for chat history and message storage using JSON files
+Organized by session with hierarchical folder structure
 """
 from typing import List, Dict, Any, Optional
 import logging
@@ -10,9 +11,15 @@ import os
 import uuid
 from pathlib import Path
 
-# Global data directory
+# Global data directory with sessions subfolder
 DATA_DIR = Path(__file__).parent / "data"
+SESSIONS_DIR = DATA_DIR / "sessions"
+GLOBAL_DIR = DATA_DIR / "global"
+
+# Create directories
 DATA_DIR.mkdir(exist_ok=True)
+SESSIONS_DIR.mkdir(exist_ok=True)
+GLOBAL_DIR.mkdir(exist_ok=True)
 
 class ChatMessage(BaseModel):
     id: str
@@ -22,9 +29,33 @@ class ChatMessage(BaseModel):
     agent_type: Optional[str] = None
     session_id: str
 
+def get_session_dir(session_id: str) -> Path:
+    """Get the directory for a specific session"""
+    session_dir = SESSIONS_DIR / f"session-{session_id}"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return session_dir
+
 def get_session_file(session_id: str) -> Path:
-    """Get the JSON file path for a session"""
-    return DATA_DIR / f"chat_{session_id}.json"
+    """Get the chat JSON file path for a session"""
+    session_dir = get_session_dir(session_id)
+    return session_dir / "chat.json"
+
+def get_session_email_drafts_dir(session_id: str) -> Path:
+    """Get the email drafts directory for a session"""
+    drafts_dir = get_session_dir(session_id) / "email_drafts"
+    drafts_dir.mkdir(parents=True, exist_ok=True)
+    return drafts_dir
+
+def get_session_files_dir(session_id: str) -> Path:
+    """Get the uploaded files directory for a session"""
+    files_dir = get_session_dir(session_id) / "files"
+    files_dir.mkdir(parents=True, exist_ok=True)
+    return files_dir
+
+def get_session_notes_file(session_id: str) -> Path:
+    """Get the notes file for a specific session"""
+    session_dir = get_session_dir(session_id)
+    return session_dir / "notes.json"
 
 async def save_message(message_doc: ChatMessage):
     """Save message to JSON file"""
@@ -76,13 +107,18 @@ async def get_chat_history_by_session(session_id: str) -> List[ChatMessage]:
         return []
 
 def get_notes_file() -> Path:
-    """Get the JSON file path for notes"""
-    return DATA_DIR / "notes.json"
+    """Get the JSON file path for global notes (backward compatibility)"""
+    return GLOBAL_DIR / "notes.json"
 
-async def save_note(note_doc: dict) -> str:
-    """Save note to JSON file"""
+async def save_note(note_doc: dict, session_id: str = None) -> str:
+    """Save note to JSON file (session-specific or global)"""
     try:
-        notes_file = get_notes_file()
+        # Use session-specific notes if session_id provided, otherwise global
+        if session_id:
+            notes_file = get_session_notes_file(session_id)
+        else:
+            notes_file = get_notes_file()
+        
         notes = []
 
         # Load existing notes if file exists
@@ -93,6 +129,7 @@ async def save_note(note_doc: dict) -> str:
         # Add new note with ID
         note_id = str(uuid.uuid4())
         note_doc['id'] = note_id
+        note_doc['session_id'] = session_id  # Track which session created the note
         # Convert datetime to ISO string for JSON serialization
         if 'created_at' in note_doc and isinstance(note_doc['created_at'], datetime):
             note_doc['created_at'] = note_doc['created_at'].isoformat()

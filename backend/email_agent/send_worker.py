@@ -90,9 +90,10 @@ class SendWorker:
             result = await gmail_connector.send_email(draft, access_token)
             
             if result.success:
-                # Update draft status
+                # Update draft status (using draft's session_id)
                 await draft_storage.update_draft_status(
                     draft.id,
+                    draft.session_id,
                     DraftStatus.SENT,
                     sent_at=result.sent_at,
                     gmail_message_id=result.gmail_message_id,
@@ -109,7 +110,7 @@ class SendWorker:
                 else:
                     # Max retries reached
                     logging.error(f"Email {draft.id} failed after {retry_count + 1} attempts")
-                    await draft_storage.update_draft_status(draft.id, DraftStatus.FAILED)
+                    await draft_storage.update_draft_status(draft.id, draft.session_id, DraftStatus.FAILED)
                     result.retry_count = retry_count
                     return result
         
@@ -122,7 +123,7 @@ class SendWorker:
                 await asyncio.sleep(self.RETRY_DELAY_SECONDS)
                 return await self._send_email(draft, access_token, retry_count + 1)
             else:
-                await draft_storage.update_draft_status(draft.id, DraftStatus.FAILED)
+                await draft_storage.update_draft_status(draft.id, draft.session_id, DraftStatus.FAILED)
                 return SendResult(
                     draft_id=draft.id,
                     success=False,

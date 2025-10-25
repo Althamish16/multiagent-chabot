@@ -19,7 +19,7 @@ from config import (
 )
 
 # Import database utilities
-from database_utils import save_message, get_chat_history_by_session, set_database_connection, ChatMessage, save_note
+from database_utils import save_message, get_chat_history_by_session, set_database_connection, ChatMessage, save_note, get_session_files_dir
 
 # Required imports - no fallbacks
 try:
@@ -48,7 +48,19 @@ try:
     enhanced_orchestrator = DynamicMultiAgentOrchestrator()
     print("✅ Enhanced agents loaded")
 except ImportError as e:
-    raise RuntimeError(f"❌ Enhanced agents not available: {e}")
+    print(f"⚠️ Enhanced agents not available: {e}")
+    enhanced_orchestrator = None
+
+try:
+    from advanced_file_summarizer_agent import AdvancedFileSummarizerAgent
+    advanced_file_summarizer = AdvancedFileSummarizerAgent()
+    print("✅ Advanced file summarizer loaded")
+except ImportError as e:
+    print(f"⚠️ Advanced file summarizer not available: {e}")
+    advanced_file_summarizer = None
+
+# Session-based file storage (stores uploaded files per session)
+session_files = {}  # {session_id: [{name, content, timestamp}]}
 
 # JSON file storage (no MongoDB needed for POC)
 print("📝 Using JSON file storage for chat messages")
@@ -522,19 +534,84 @@ async def root():
 # Enhanced Chat Endpoint with LangGraph Integration
 @api_router.post("/enhanced-chat")
 async def enhanced_chat_with_agents(
-    chat_input: ChatMessageCreate,
     request: Request,
-    current_user: UserProfile = Depends(get_current_user)
+    current_user: UserProfile = Depends(get_current_user),
+    message: Optional[str] = None,
+    session_id: Optional[str] = None,
+    file: Optional[UploadFile] = File(None)
 ):
-    """Enhanced chat with multi-agent collaboration via LangGraph"""
+    """Enhanced chat with multi-agent collaboration via LangGraph
+    Supports both JSON (regular chat) and FormData (chat with file attachment)
+    """
     try:
+        # Handle both JSON and FormData
+        if file:
+            logging.info(f"File detected: {file.filename}, content_type: {file.content_type}")
+            # FormData request with file attachment
+            form_data = await request.form()
+            message = form_data.get("message")
+            session_id = form_data.get("session_id")
+            file_content = await file.read()
+            file_name = file.filename
+            
+            logging.info(f"File content length: {len(file_content)} bytes")
+            logging.info(f"Session ID: {session_id}")
+            logging.info(f"Message: {message}")
+            
+            # Get session files directory and create it
+            files_dir = get_session_files_dir(session_id)
+            logging.info(f"Files directory: {files_dir}")
+            
+            # Save file to disk
+            file_path = files_dir / file_name
+            logging.info(f"Attempting to save file to: {file_path}")
+            
+            try:
+                with open(file_path, 'wb') as f:
+                    f.write(file_content)
+                logging.info(f"Successfully saved file to disk: {file_path} ({len(file_content)} bytes)")
+                
+                # Verify file was saved
+                if file_path.exists():
+                    logging.info(f"File exists on disk: {file_path.stat().st_size} bytes")
+                else:
+                    logging.error(f"File does not exist after saving: {file_path}")
+                    
+            except Exception as e:
+                logging.error(f"Failed to save file to disk: {e}")
+                # Continue without saving to disk - file will still be in memory
+            
+            # Store file metadata in session (in memory for quick access)
+            if session_id not in session_files:
+                session_files[session_id] = []
+            
+            session_files[session_id].append({
+                "name": file_name,
+                "content": file_content,
+                "path": str(file_path) if 'file_path' in locals() else None,  # Add path for disk reference
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "size": len(file_content)
+            })
+            
+            user_message = f"{message}\n\n📎 Attached file: {file_name}"
+        else:
+            # JSON request without file
+            body = await request.json()
+            message = body.get("message")
+            session_id = body.get("session_id")
+            file_content = None
+            file_name = None
+            user_message = message
+            
+            logging.info(f"Received message via JSON")
+        
         # Save user message with user context
         user_message_doc = ChatMessage(
             id=str(uuid.uuid4()),
-            message=chat_input.message,
+            message=user_message,
             sender="user", 
             timestamp=datetime.now(timezone.utc),
-            session_id=chat_input.session_id
+            session_id=session_id
         )
         
         await save_message(user_message_doc)
@@ -552,19 +629,56 @@ async def enhanced_chat_with_agents(
                 from auth_new import session_store, GoogleAuth
                 auth = GoogleAuth()
                 payload = auth.verify_jwt_token(token)
-                session_id = payload.get('session_id')
-                if session_id:
-                    session = session_store.get(session_id)
+                auth_session_id = payload.get('session_id')  # Renamed to avoid confusion with chat session_id
+                if auth_session_id:
+                    session = session_store.get(auth_session_id)
                     if session:
                         access_token = session.get('google_access_token')
         except Exception as e:
             logging.warning(f"Could not get Google access token: {e}")
         
+        # Check if file was just uploaded OR if there are files in this session from before
+        if not file_content and session_id:
+            # Try to get file from memory first
+            if session_id in session_files and session_files[session_id]:
+                latest_file = session_files[session_id][-1]
+                file_content = latest_file["content"]
+                file_name = latest_file["name"]
+                logging.info(f"Using file {file_name} from session memory")
+            else:
+                # Try to load from disk
+                files_dir = get_session_files_dir(session_id)
+                if files_dir.exists():
+                    file_paths = list(files_dir.glob("*"))
+                    if file_paths:
+                        # Get the most recent file
+                        latest_file_path = max(file_paths, key=lambda p: p.stat().st_mtime)
+                        with open(latest_file_path, 'rb') as f:
+                            file_content = f.read()
+                        file_name = latest_file_path.name
+                        
+                        # Cache in memory for future use
+                        if session_id not in session_files:
+                            session_files[session_id] = []
+                        session_files[session_id].append({
+                            "name": file_name,
+                            "content": file_content,
+                            "path": str(latest_file_path),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "size": len(file_content)
+                        })
+                        
+                        logging.info(f"Loaded file {file_name} from disk: {latest_file_path}")
+                    else:
+                        logging.info(f"No files found in session {session_id}")
+        
         # Process with enhanced orchestrator
         result = await enhanced_orchestrator.process_request(
-            user_request=chat_input.message,
-            session_id=chat_input.session_id,
-            access_token=access_token
+            user_request=message,
+            session_id=session_id,
+            access_token=access_token,
+            file_content=file_content,
+            file_name=file_name
         )
 
         # Validate result structure
@@ -583,7 +697,7 @@ async def enhanced_chat_with_agents(
             message=result["response"],
             sender="agent",
             timestamp=datetime.now(timezone.utc),
-            session_id=chat_input.session_id,
+            session_id=session_id,
             agent_type=result["agent_used"]
         )
         
@@ -600,8 +714,8 @@ async def enhanced_chat_with_agents(
             "agents_involved": result.get("agents_involved", []),
             "collaboration_data": result.get("collaboration_data", {}),
             "timestamp": datetime.now(timezone.utc),
-            "session_id": chat_input.session_id,
-            "user": "demo-user",
+            "session_id": session_id,
+            "user": current_user.email if current_user else "demo-user",
             "enhanced": bool(enhanced_orchestrator),
             "demo_mode": not HAS_LLM_KEYS
         }
@@ -735,18 +849,59 @@ async def upload_file(
         else:
             file_content = f"[File uploaded: {file.filename}]\nFile type: {file.content_type}\nSize: {len(content)} bytes"
         
-        # Use enhanced file processing if available, otherwise use basic
-        if enhanced_orchestrator:
+        # Use advanced file summarizer if available
+        if advanced_file_summarizer:
+            result = await advanced_file_summarizer.process_file(
+                file_content=content,
+                file_name=file.filename,
+                user_request=f"Summarize this {file.filename} file",
+                summary_mode="detailed"
+            )
+
+            if result["status"] == "success":
+                summary = result["summary"]
+                key_insights = result.get("key_insights", [])
+                metadata = result.get("metadata", {})
+
+                response_data = {
+                    "filename": file.filename,
+                    "size": len(content),
+                    "summary": summary,
+                    "key_insights": key_insights,
+                    "metadata": metadata,
+                    "session_id": session_id,
+                    "processing_type": "advanced_langgraph",
+                    "demo_mode": not HAS_LLM_KEYS
+                }
+            else:
+                response_data = {
+                    "filename": file.filename,
+                    "size": len(content),
+                    "error": result.get("message", "Processing failed"),
+                    "session_id": session_id,
+                    "processing_type": "advanced_langgraph_error",
+                    "demo_mode": not HAS_LLM_KEYS
+                }
+        elif enhanced_orchestrator:
             state = {
                 "user_request": f"Analyze and process the uploaded file: {file.filename} with enhanced collaboration features",
                 "context": {"file_name": file.filename, "file_size": len(content)},
                 "workflow_type": "document_workflow",
                 "results": {}
             }
-            
+
             result = await enhanced_orchestrator.file_agent.process_request(state, file_content)
             summary = result.get("message", "File processed with enhanced features")
             processing_type = "enhanced_multi_agent"
+
+            response_data = {
+                "filename": file.filename,
+                "size": len(content),
+                "summary": summary,
+                "session_id": session_id,
+                "processing_type": processing_type,
+                "demo_mode": not HAS_LLM_KEYS
+            }
         else:
             # Basic file processing
             summary = await file_summarizer_agent.process_request(
@@ -754,18 +909,39 @@ async def upload_file(
                 file_content
             )
             processing_type = "basic"
-        
-        return JSONResponse(content={
-            "filename": file.filename,
-            "size": len(content),
-            "summary": summary,
-            "session_id": session_id,
-            "processing_type": processing_type,
-            "demo_mode": not HAS_LLM_KEYS
-        })
+
+            response_data = {
+                "filename": file.filename,
+                "size": len(content),
+                "summary": summary,
+                "session_id": session_id,
+                "processing_type": processing_type,
+                "demo_mode": not HAS_LLM_KEYS
+            }
+
+        return JSONResponse(content=response_data)
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File upload error: {str(e)}")
+
+# Get session files
+@api_router.get("/session-files/{session_id}")
+async def get_session_files(session_id: str, current_user: UserProfile = Depends(get_optional_user)):
+    """Get list of files uploaded in this session"""
+    files = session_files.get(session_id, [])
+    return JSONResponse(content={
+        "session_id": session_id,
+        "files": [{"name": f["name"], "size": f["size"], "timestamp": f["timestamp"]} for f in files],
+        "count": len(files)
+    })
+
+# Clear session files
+@api_router.delete("/session-files/{session_id}")
+async def clear_session_files(session_id: str, current_user: UserProfile = Depends(get_optional_user)):
+    """Clear all files from a session"""
+    if session_id in session_files:
+        del session_files[session_id]
+    return JSONResponse(content={"status": "success", "message": "Session files cleared"})
 
 # Legacy file upload for non-authenticated users
 @api_router.post("/upload-legacy")
@@ -835,12 +1011,14 @@ class DraftEmailRequest(BaseModel):
 
 class ApproveEmailRequest(BaseModel):
     draft_id: str
+    session_id: Optional[str] = None  # Optional - will search if not provided
     feedback: Optional[str] = None
     modifications: Optional[Dict[str, str]] = None
 
 
 class SendEmailRequest(BaseModel):
     draft_id: str
+    session_id: Optional[str] = None  # Optional - will search if not provided
 
 
 @api_router.post("/email/draft")
@@ -965,6 +1143,7 @@ async def list_drafts(
 @api_router.get("/email/draft/{draft_id}")
 async def get_draft(
     draft_id: str,
+    session_id: Optional[str] = None,  # Optional - will search all sessions if not provided
     user: UserProfile = Depends(get_current_user)
 ):
     """Get details of a specific draft"""
@@ -972,7 +1151,7 @@ async def get_draft(
         raise HTTPException(status_code=503, detail="Email agent not available")
     
     try:
-        draft = await draft_storage.get_draft(draft_id)
+        draft = await draft_storage.get_draft(draft_id, session_id)
         
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
@@ -989,6 +1168,7 @@ async def get_draft(
 @api_router.delete("/email/draft/{draft_id}")
 async def delete_draft(
     draft_id: str,
+    session_id: Optional[str] = None,  # Optional - will search all sessions if not provided
     user: UserProfile = Depends(get_current_user)
 ):
     """Delete an email draft"""
@@ -996,7 +1176,7 @@ async def delete_draft(
         raise HTTPException(status_code=503, detail="Email agent not available")
     
     try:
-        success = await draft_storage.delete_draft(draft_id)
+        success = await draft_storage.delete_draft(draft_id, session_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="Draft not found")

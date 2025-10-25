@@ -10,7 +10,7 @@ from datetime import datetime
 
 from calendar_agent import EnhancedCalendarAgent
 from notes_agent import EnhancedNotesAgent
-from file_summarizer_agent import EnhancedFileSummarizerAgent
+from advanced_file_summarizer_agent import AdvancedFileSummarizerAgent
 from email_agent import EnhancedEmailAgent
 from config import (
     AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
@@ -24,7 +24,8 @@ class OrchestratorState(TypedDict):
     user_request: str
     session_id: str
     access_token: Optional[str]
-    file_content: Optional[str]
+    file_content: Optional[bytes]
+    file_name: Optional[str]
     conversation_history: List[Dict[str, Any]]
     analysis_result: Dict[str, Any]
     agent_results: Dict[str, Any]
@@ -45,7 +46,7 @@ class DynamicMultiAgentOrchestrator:
         )
         self.calendar_agent = EnhancedCalendarAgent()
         self.notes_agent = EnhancedNotesAgent()
-        self.file_agent = EnhancedFileSummarizerAgent()
+        self.file_agent = AdvancedFileSummarizerAgent()
         self.email_agent = EnhancedEmailAgent()
 
         # Build the LangGraph
@@ -100,9 +101,33 @@ class DynamicMultiAgentOrchestrator:
             logging.warning(f"Failed to load conversation history: {e}")
             state["conversation_history"] = []
 
+        # Load available files information
+        file_context = ""
+        try:
+            from database_utils import get_session_files_dir
+            
+            # Check current session only
+            files_dir = get_session_files_dir(state['session_id'])
+            file_paths = []
+            if files_dir.exists():
+                file_paths.extend(list(files_dir.glob("*")))
+            
+            if file_paths:
+                file_info = []
+                for file_path in file_paths:
+                    file_size = file_path.stat().st_size
+                    file_info.append(f"- {file_path.name} ({file_size} bytes)")
+                
+                file_context = f"Available files in current session:\n" + "\n".join(file_info)
+            else:
+                file_context = "No files available in current session."
+        except Exception as e:
+            logging.warning(f"Failed to load file context: {e}")
+            file_context = "File context unavailable."
+
         analysis_prompt = ChatPromptTemplate.from_template("""
         You are the Orchestrator for a multi-agent system. Decide which agents to run and in what order based on
-        the current user request and recent conversation.
+        the current user request, recent conversation, and available files.
 
         Current date: {current_date}
 
@@ -118,6 +143,7 @@ class DynamicMultiAgentOrchestrator:
             email_agent → calendar_agent to schedule from an email; file_agent → notes_agent to capture a summary).
         - If nothing actionable is required, return an empty list for agents_to_invoke.
         - Prefer single-agent workflows when possible.
+        - Consider available files when deciding whether to invoke file_agent.
 
         Output format (STRICT JSON only; no prose, no markdown, no code fences):
                 {{
@@ -138,6 +164,8 @@ class DynamicMultiAgentOrchestrator:
         - Do not include agents that are not clearly relevant.
         - Do not include chain-of-thought. Return ONLY the JSON object.
 
+        {file_context}
+
         Conversation (last messages):
         {conversation_history}
 
@@ -151,6 +179,7 @@ class DynamicMultiAgentOrchestrator:
         result = await chain.ainvoke({
             "user_request": state["user_request"],
             "conversation_history": conversation_text,
+            "file_context": file_context,
             "current_date": current_date
         })
 
@@ -269,16 +298,64 @@ class DynamicMultiAgentOrchestrator:
     async def _execute_file_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the file agent"""
         logging.info("Executing file agent")
-        agent_state = {
-            "user_request": state["user_request"],
-            "context": state.get("agent_results", {}),
-            "conversation_history": state.get("conversation_history", []),
-            "results": {}
-        }
-
-        result = await self.file_agent.process_request(agent_state, state.get("file_content"))
+        
+        file_content = state.get("file_content")
+        if not file_content:
+            result = {
+                "status": "error",
+                "message": "📄 No file content provided for analysis",
+                "collaboration_data": {}
+            }
+        else:
+            # Convert string to bytes if needed
+            if isinstance(file_content, str):
+                file_content_bytes = file_content.encode('utf-8')
+            else:
+                file_content_bytes = file_content
+            
+            # Extract file name from state or use default
+            file_name = state.get("file_name", "uploaded_file.txt")
+            
+            # Determine summary mode from user request or default
+            user_request = state["user_request"]
+            summary_mode = "detailed"  # default
+            if "brief" in user_request.lower():
+                summary_mode = "brief"
+            elif "executive" in user_request.lower():
+                summary_mode = "executive"
+            
+            # Call the advanced file summarizer
+            result = await self.file_agent.process_file(
+                file_content=file_content_bytes,
+                file_name=file_name,
+                user_request=user_request,
+                summary_mode=summary_mode,
+                query=None,  # Could be extracted from user_request if it's a query
+                conversation_history=state.get("conversation_history", [])
+            )
+            
+            # Adapt the response format to match what the orchestrator expects
+            if result["status"] == "success":
+                adapted_result = {
+                    "status": "success",
+                    "result": {
+                        "summary": result.get("summary", ""),
+                        "key_insights": result.get("key_insights", []),
+                        "metadata": result.get("metadata", {}),
+                        "file_type": result.get("file_type", ""),
+                        "query_response": result.get("query_response")
+                    },
+                    "message": f"📄 **Advanced Document Analysis Complete**\n\n**Summary:** {result.get('summary', '')[:200]}...\n\n**Key Insights:** {len(result.get('key_insights', []))} insights extracted",
+                    "collaboration_data": {
+                        "analysis": result,
+                        "recommended_workflows": {},  # Could be enhanced later
+                        "next_actions": result.get("key_insights", [])
+                    }
+                }
+                result = adapted_result
+            # If error, the format is already compatible
+        
         state["agent_results"]["file_agent"] = result
-
         return state
 
     async def _execute_email_agent(self, state: OrchestratorState) -> OrchestratorState:
@@ -375,7 +452,7 @@ class DynamicMultiAgentOrchestrator:
         state["final_response"] = response.content
         return state
 
-    async def process_request(self, user_request: str, session_id: str, access_token: str = None, file_content: str = None) -> Dict[str, Any]:
+    async def process_request(self, user_request: str, session_id: str, access_token: str = None, file_content: bytes = None, file_name: str = None) -> Dict[str, Any]:
         """Process user request through the dynamic LangGraph orchestrator"""
         logging.info(f"Processing request: '{user_request}' for session {session_id}")
 
@@ -386,6 +463,7 @@ class DynamicMultiAgentOrchestrator:
                 "session_id": session_id,
                 "access_token": access_token,
                 "file_content": file_content,
+                "file_name": file_name,
                 "conversation_history": [],
                 "analysis_result": {},
                 "agent_results": {},
