@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { useAuth } from './components/AuthProvider_new';
+import { EmailDraftModal } from './components/EmailDraftModal';
+import { DraftListModal } from './components/DraftListModal';
+import { DraftIcon } from './components/DraftIcon';
 import './App.css';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000/api';
@@ -15,6 +18,12 @@ function App() {
   const [chatSessions, setChatSessions] = useState([]);
   const [showSidebar, setShowSidebar] = useState(true);
   const [profileImageError, setProfileImageError] = useState(false);
+  
+  // Email draft states
+  const [currentDraft, setCurrentDraft] = useState(null);
+  const [showDraftModal, setShowDraftModal] = useState(false);
+  const [showDraftList, setShowDraftList] = useState(false);
+  
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -133,6 +142,54 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Draft management functions
+  const loadAndShowDraft = async (draftId) => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const response = await axios.get(
+        `${API_BASE_URL}/email/draft/${draftId}`,
+        {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+          params: { session_id: sessionId }
+        }
+      );
+
+      setCurrentDraft(response.data);
+      setShowDraftModal(true);
+    } catch (err) {
+      console.error('Failed to load draft:', err);
+    }
+  };
+
+  const handleDraftUpdate = (updatedDraft) => {
+    setCurrentDraft(updatedDraft);
+  };
+
+  const handleDraftSend = (draftId) => {
+    console.log('Email sent:', draftId);
+    setShowDraftModal(false);
+    setCurrentDraft(null);
+    
+    // Refresh draft count
+    if (window.refreshDraftCount) {
+      window.refreshDraftCount();
+    }
+  };
+
+  const handleCloseDraftModal = () => {
+    setShowDraftModal(false);
+    // Don't clear currentDraft immediately - user might want to edit via chat
+  };
+
+  const handleOpenDraftList = () => {
+    setShowDraftList(true);
+  };
+
+  const handleSelectDraftFromList = (draft) => {
+    setCurrentDraft(draft);
+    setShowDraftModal(true);
+  };
+
   const handleFileSelect = (event) => {
     const file = event.target.files[0];
     if (file) {
@@ -231,6 +288,18 @@ function App() {
         console.log('💬 Messages after agent response:', updated.length);
         return updated;
       });
+
+      // Check if email draft was created
+      if (response.data.draft_created) {
+        console.log('📧 Draft created:', response.data.draft_created);
+        // Load full draft details and show modal
+        loadAndShowDraft(response.data.draft_created.draft_id);
+        
+        // Refresh draft count
+        if (window.refreshDraftCount) {
+          window.refreshDraftCount();
+        }
+      }
 
     } catch (error) {
       console.error('❌ Error sending message:', error);
@@ -523,6 +592,32 @@ function App() {
             </div>
           </div>
         </main>
+
+        {/* Email Draft Icon */}
+        <DraftIcon 
+          sessionId={sessionId}
+          onClick={handleOpenDraftList}
+          isAuthenticated={isAuthenticated}
+        />
+
+        {/* Email Draft Modal */}
+        {showDraftModal && currentDraft && (
+          <EmailDraftModal
+            draft={currentDraft}
+            onClose={handleCloseDraftModal}
+            onSend={handleDraftSend}
+            onUpdate={handleDraftUpdate}
+          />
+        )}
+
+        {/* Draft List Modal */}
+        {showDraftList && (
+          <DraftListModal
+            sessionId={sessionId}
+            onClose={() => setShowDraftList(false)}
+            onSelectDraft={handleSelectDraftFromList}
+          />
+        )}
       </div>
     </div>
   );

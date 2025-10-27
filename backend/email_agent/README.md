@@ -52,7 +52,7 @@ Create an AI-generated email draft
 }
 ```
 
-### POST `/api/email/approve`
+### POST `/api/email/send`
 Approve a draft for sending
 ```json
 {
@@ -103,8 +103,7 @@ User: "Draft an email to praveen@example.com requesting sick leave for tomorrow"
 3. Safety checks performed
 4. Draft saved with status `pending_approval`
 5. User reviews draft in UI
-6. User calls `/api/email/approve` with draft_id
-7. User calls `/api/email/send` with draft_id
+6. User calls `/api/email/send` with draft_id
 8. Gmail API sends email
 9. Draft updated to status `sent`
 

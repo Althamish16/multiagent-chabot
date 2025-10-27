@@ -114,7 +114,7 @@ class GmailConnector:
     async def get_recent_emails(
         self,
         access_token: str,
-        max_results: int = 10,
+        max_results: int = 5,
         query: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Fetch recent emails for context (optional feature)"""
@@ -199,7 +199,7 @@ class GmailConnector:
     async def list_emails(
         self,
         access_token: str,
-        max_results: int = 10,
+        max_results: int = 5,
         query: Optional[str] = None,
         label_ids: Optional[List[str]] = None,
         page_token: Optional[str] = None

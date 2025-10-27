@@ -162,7 +162,7 @@ class EnhancedEmailAgent:
                 "to": draft.to,
                 "subject": draft.subject,
                 "body": draft.body,
-                "status": draft.status.value,
+                "status": draft.status.value if hasattr(draft.status, 'value') else draft.status,
                 "safety_checks": draft.safety_checks,
                 "created_at": draft.created_at.isoformat()
             }
@@ -197,7 +197,7 @@ class EnhancedEmailAgent:
             "message": f"Draft {draft_id} approved. Ready to send.",
             "result": {
                 "draft_id": draft.id,
-                "status": draft.status.value,
+                "status": draft.status.value if hasattr(draft.status, 'value') else draft.status,
                 "approved_at": draft.approved_at.isoformat() if draft.approved_at else None
             }
         }
@@ -272,7 +272,7 @@ class EnhancedEmailAgent:
                 "draft_id": d.id,
                 "to": d.to,
                 "subject": d.subject,
-                "status": d.status.value,
+                "status": d.status.value if hasattr(d.status, 'value') else d.status,
                 "created_at": d.created_at.isoformat(),
                 "updated_at": d.updated_at.isoformat()
             }
@@ -333,6 +333,103 @@ class EnhancedEmailAgent:
             }
         }
     
+    def _parse_email_count(self, user_request: str) -> Optional[int]:
+        """Parse the number of emails requested from natural language"""
+        import re
+        
+        # Look for patterns like "get 5 emails", "latest 3 emails", "show 10 emails"
+        patterns = [
+            r'(\d+)\s+emails?',  # "5 emails"
+            r'(\d+)\s+latest',    # "3 latest"
+            r'latest\s+(\d+)',    # "latest 2"
+            r'get\s+(\d+)',       # "get 1"
+            r'show\s+(\d+)',      # "show 5"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, user_request, re.IGNORECASE)
+            if match:
+                try:
+                    count = int(match.group(1))
+                    return min(count, 100)  # Cap at 100
+                except ValueError:
+                    continue
+        
+        # Check for singular forms that imply 1
+        if any(word in user_request for word in ['latest email', 'recent email', 'new email', 'last email']):
+            return 1
+        
+        return None  # No specific count found, use default
+    
+    def _parse_message_id(self, user_request: str) -> Optional[str]:
+        """Parse message ID from natural language request"""
+        import re
+        
+        # Look for Gmail message ID patterns
+        # Gmail message IDs are typically long alphanumeric strings
+        patterns = [
+            r'id\s+([a-zA-Z0-9]{10,})',  # "id 1234567890abcdef"
+            r'message\s+id\s+([a-zA-Z0-9]{10,})',  # "message id 1234567890abcdef"
+            r'email\s+id\s+([a-zA-Z0-9]{10,})',  # "email id 1234567890abcdef"
+            r'message\s+([a-zA-Z0-9]{10,})',  # "message 1234567890abcdef"
+            r'email\s+([a-zA-Z0-9]{10,})',  # "email 1234567890abcdef"
+            r'([a-zA-Z0-9]{16,})',  # Just a long alphanumeric string (likely message ID)
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, user_request, re.IGNORECASE)
+            if match:
+                message_id = match.group(1)
+                # Basic validation - Gmail message IDs are usually 16+ characters
+                if len(message_id) >= 10:
+                    return message_id
+        
+        return None  # No message ID found
+    
+    def _extract_search_keywords(self, user_request: str) -> List[str]:
+        """Extract meaningful keywords from user request for email search"""
+        import re
+        
+        # Common stop words to filter out
+        stop_words = {
+            'a', 'an', 'the', 'and', 'or', 'but', 'if', 'while', 'at', 'by', 'for', 'with', 
+            'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after',
+            'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 
+            'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 
+            'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 
+            'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 
+            'very', 'can', 'will', 'just', 'should', 'now', 'get', 'show', 'list', 'find',
+            'search', 'look', 'check', 'see', 'mail', 'email', 'emails', 'message', 'messages',
+            'received', 'sent', 'got', 'have', 'has', 'had', 'do', 'does', 'did', 'is', 'are',
+            'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did',
+            'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 'yours',
+            'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', 'her', 'hers',
+            'herself', 'it', 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves'
+        }
+        
+        # Split into words and filter
+        words = re.findall(r'\b\w+\b', user_request.lower())
+        keywords = [word for word in words if len(word) > 2 and word not in stop_words]
+        
+        # Prioritize proper nouns, organizations, and specific terms
+        priority_keywords = []
+        for keyword in keywords:
+            # Capitalized words (likely proper nouns)
+            if keyword[0].isupper():
+                priority_keywords.append(keyword)
+            # Numbers (like account numbers, dates)
+            elif keyword.isdigit() and len(keyword) > 3:
+                priority_keywords.append(keyword)
+            # All caps (likely acronyms like ICICI, HSBC)
+            elif keyword.isupper() and len(keyword) > 2:
+                priority_keywords.append(keyword)
+        
+        # If we have priority keywords, use them; otherwise use all filtered keywords
+        if priority_keywords:
+            return priority_keywords[:3]  # Limit to top 3 to avoid too broad search
+        else:
+            return keywords[:3]  # Limit to 3 keywords max
+    
     async def _handle_read(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Handle email reading/fetching request"""
         
@@ -345,9 +442,18 @@ class EnhancedEmailAgent:
             }
         
         user_request = state.get("user_request", "").lower()
-        max_results = state.get("max_results", 10)
+        max_results = state.get("max_results", 5)
         query = state.get("query")
         message_id = state.get("message_id")
+        
+        # Parse dynamic max_results from user request
+        parsed_max_results = self._parse_email_count(user_request)
+        if parsed_max_results is not None:
+            max_results = min(parsed_max_results, 100)  # Cap at 100
+        
+        # Parse message_id from user request if not provided
+        if not message_id:
+            message_id = self._parse_message_id(user_request)
         
         try:
             # If specific message ID requested
@@ -372,20 +478,51 @@ class EnhancedEmailAgent:
             # List emails based on request
             # Parse query from natural language
             if not query:
+                query_parts = []
+                
+                # Handle status filters
                 if "unread" in user_request:
-                    query = "is:unread"
+                    query_parts.append("is:unread")
                 elif "important" in user_request:
-                    query = "is:important"
+                    query_parts.append("is:important")
                 elif "starred" in user_request:
-                    query = "is:starred"
-                # Check for sender filter
-                if "from " in user_request:
-                    # Extract email after "from"
-                    import re
-                    match = re.search(r'from\s+([^\s]+@[^\s]+)', user_request)
+                    query_parts.append("is:starred")
+                
+                # Handle time-based filters
+                if any(word in user_request for word in ["recent", "latest", "new", "today"]):
+                    # For recent emails, we could add date filters, but Gmail search is limited
+                    # Just rely on the natural ordering from Gmail API
+                    pass
+                
+                # Check for sender filter - more flexible parsing
+                import re
+                sender_patterns = [
+                    r'from\s+([^\s]+@[^\s]+)',  # "from email@domain.com"
+                    r'from\s+([^\s]+)',         # "from John" or "from ICICI"
+                ]
+                for pattern in sender_patterns:
+                    match = re.search(pattern, user_request, re.IGNORECASE)
                     if match:
                         sender = match.group(1)
-                        query = f"from:{sender}" if not query else f"{query} from:{sender}"
+                        # If it looks like an email address, use from: filter
+                        if '@' in sender:
+                            query_parts.append(f"from:{sender}")
+                        else:
+                            # For names/organizations, search in from field
+                            query_parts.append(f"from:{sender}")
+                        break
+                
+                # Extract keywords for subject/body search
+                # Remove common words and extract potential search terms
+                keywords = self._extract_search_keywords(user_request)
+                if keywords:
+                    # Add keywords to search in subject and body
+                    keyword_query = " OR ".join(keywords)
+                    query_parts.append(f"subject:({keyword_query}) OR {keyword_query}")
+                
+                # Combine all query parts
+                if query_parts:
+                    query = " ".join(query_parts)
             
             # Fetch emails
             result = await self.connector.list_emails(

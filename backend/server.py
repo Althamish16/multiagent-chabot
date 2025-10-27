@@ -38,6 +38,7 @@ try:
         session_store,
         UserProfile
     )
+    from google_auth import GoogleAPIClient
     from auth_routes import auth_router, create_callback_html
     print("✅ Google OAuth authentication loaded")
 except ImportError as e:
@@ -706,7 +707,7 @@ async def enhanced_chat_with_agents(
         # Format response as HTML
         html_response = format_response_as_html(result["response"], result["agent_used"])
         
-        return {
+        response_data = {
             "response": result["response"],
             "html_response": html_response,
             "agent_used": result["agent_used"], 
@@ -719,6 +720,12 @@ async def enhanced_chat_with_agents(
             "enhanced": bool(enhanced_orchestrator),
             "demo_mode": not HAS_LLM_KEYS
         }
+        
+        # Add draft info if email draft was created
+        if "draft_created" in result:
+            response_data["draft_created"] = result["draft_created"]
+        
+        return response_data
         
     except Exception as e:
         logging.error(f"Enhanced chat error: {str(e)}")
@@ -1063,9 +1070,11 @@ async def approve_email(
         raise HTTPException(status_code=503, detail="Email agent not available")
     
     try:
+        logging.info(f"Approving draft {request.draft_id} for user {user.email}")
+        
         decision = ApprovalDecision(
             draft_id=request.draft_id,
-            user_id=user.id,
+            user_id=user.email or user.id or "anonymous",
             approved=True,
             feedback=request.feedback,
             modifications_requested=request.modifications
@@ -1073,15 +1082,18 @@ async def approve_email(
         
         draft = await approval_workflow.process_decision(decision)
         
+        status_value = draft.status.value if hasattr(draft.status, 'value') else draft.status
+        
         return JSONResponse(content={
             "status": "success",
             "message": "Email draft approved",
             "draft_id": draft.id,
-            "draft_status": draft.status.value
+            "draft_status": status_value
         })
         
     except Exception as e:
         logging.error(f"Email approval error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1096,11 +1108,13 @@ async def send_email(
         raise HTTPException(status_code=503, detail="Email agent not available")
     
     try:
+        logging.info(f"Sending draft {request.draft_id} for user {user.email}")
+        
         state = {
             "action": "send",
             "draft_id": request.draft_id,
-            "session_id": "api_send",
-            "user_id": user.id,
+            "session_id": request.session_id or "api_send",
+            "user_id": user.email or user.id or "anonymous",
             "access_token": google_token
         }
         
@@ -1194,9 +1208,59 @@ async def delete_draft(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class UpdateDraftRequest(BaseModel):
+    to: Optional[str] = None
+    cc: Optional[str] = None
+    bcc: Optional[str] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    user_request: Optional[str] = None
+
+
+@api_router.put("/email/draft/{draft_id}")
+async def update_draft(
+    draft_id: str,
+    request: UpdateDraftRequest,
+    session_id: Optional[str] = None,
+    user: UserProfile = Depends(get_current_user)
+):
+    """Update an email draft"""
+    if not enhanced_email_agent:
+        raise HTTPException(status_code=503, detail="Email agent not available")
+    
+    try:
+        modifications = {}
+        if request.to:
+            modifications["to"] = request.to
+        if request.cc:
+            modifications["cc"] = request.cc
+        if request.bcc:
+            modifications["bcc"] = request.bcc
+        if request.subject:
+            modifications["subject"] = request.subject
+        if request.body:
+            modifications["body"] = request.body
+        
+        state = {
+            "action": "update",
+            "draft_id": draft_id,
+            "user_id": user.id,
+            "modifications": modifications,
+            "user_request": request.user_request or ""
+        }
+        
+        result = await enhanced_email_agent.process_request(state)
+        
+        return JSONResponse(content=result)
+        
+    except Exception as e:
+        logging.error(f"Update draft error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @api_router.get("/email/inbox")
 async def get_inbox_emails(
-    max_results: int = 10,
+    max_results: int = 5,
     query: Optional[str] = None,
     user: UserProfile = Depends(get_current_user),
     google_token: str = Depends(get_google_token)
@@ -1205,7 +1269,7 @@ async def get_inbox_emails(
     List emails from Gmail inbox
     
     Query params:
-    - max_results: Number of emails to fetch (1-100, default 10)
+    - max_results: Number of emails to fetch (1-100, default 5)
     - query: Gmail search query (e.g., "is:unread", "from:someone@gmail.com")
     """
     if not enhanced_email_agent:

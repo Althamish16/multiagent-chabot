@@ -63,7 +63,7 @@ Accept: application/json
 ### ==================================
 ### 7. Approve Draft
 ### ==================================
-POST {{baseUrl}}/api/email/approve
+POST {{baseUrl}}/api/email/send
 Authorization: Bearer {{token}}
 Content-Type: application/json
 

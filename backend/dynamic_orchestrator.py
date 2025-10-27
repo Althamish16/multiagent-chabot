@@ -392,6 +392,22 @@ class DynamicMultiAgentOrchestrator:
             email_result = agent_results["email_agent"]
             if email_result.get("status") == "success":
                 result_data = email_result.get("result", {})
+                
+                # Check if this is a draft creation
+                if "draft_id" in result_data:
+                    # Draft was created - store draft info in state for frontend
+                    state["draft_created"] = {
+                        "draft_id": result_data.get("draft_id"),
+                        "to": result_data.get("to"),
+                        "subject": result_data.get("subject"),
+                        "body": result_data.get("body"),
+                        "status": result_data.get("status"),
+                        "created_at": result_data.get("created_at")
+                    }
+                    state["final_response"] = email_result.get("message", "Email draft created successfully")
+                    return state
+                
+                # Email reading/listing
                 email_summaries = result_data.get("email_summaries", [])
                 total_count = result_data.get("total_count", 0)
                 query = result_data.get("query", "")
@@ -486,8 +502,9 @@ class DynamicMultiAgentOrchestrator:
             # Extract results
             agent_results = final_state.get("agent_results", {})
             analysis = final_state.get("analysis_result", {})
+            draft_created = final_state.get("draft_created")
 
-            return {
+            result = {
                 "response": final_state.get("final_response", "Request processed successfully"),
                 "agent_used": "dynamic_langgraph_orchestrator",
                 "workflow_type": analysis.get("workflow_type", "dynamic"),
@@ -497,6 +514,12 @@ class DynamicMultiAgentOrchestrator:
                     "agent_results": agent_results
                 }
             }
+            
+            # Add draft info if email draft was created
+            if draft_created:
+                result["draft_created"] = draft_created
+            
+            return result
 
         except Exception as e:
             logging.error(f"Dynamic orchestrator error: {str(e)}")
