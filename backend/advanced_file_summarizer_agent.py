@@ -733,6 +733,109 @@ class AdvancedFileSummarizerAgent:
             state["errors"] = [f"Output formatting error: {str(e)}"]
             return state
 
+    async def _check_cached_summary(self, file_name: str, user_request: str, conversation_history: List[str]) -> Optional[Dict[str, Any]]:
+        """Check if we can use a cached summary instead of re-processing the document"""
+        if not conversation_history:
+            return None
+            
+        try:
+            # Look for previous document summaries in conversation history
+            cached_summaries = []
+            for msg in conversation_history:
+                if msg.startswith("Assistant:"):
+                    # Extract the response content
+                    response_content = msg.replace("Assistant: ", "")
+                    # Look for substantial responses that could be document summaries
+                    # Check for length (>500 chars), and contains document-related terms
+                    if (len(response_content) > 500 and 
+                        any(term in response_content.lower() for term in ["summary", "document", "analysis", "key insights", "extracted"])):
+                        cached_summaries.append(response_content)
+            
+            if not cached_summaries:
+                return None
+                
+            # Use the most recent substantial summary
+            combined_summary = cached_summaries[-1]
+            
+            # Determine if this is a question that can be answered from the summary
+            question_keywords = ["what", "how", "why", "when", "where", "who", "which", "can you", "tell me", "explain", "?"]
+            is_question = any(keyword in user_request.lower() for keyword in question_keywords) or "?" in user_request
+            
+            if is_question:
+                # Use LLM to answer the question based on cached summary
+                answer = await self._answer_from_cached_summary(user_request, combined_summary, file_name)
+                if answer:
+                    logging.info(f"Answered question from cached summary for {file_name}")
+                    return {
+                        "status": "success",
+                        "query_response": answer,
+                        "summary": combined_summary,
+                        "key_insights": [],
+                        "metadata": {
+                            "file_name": file_name,
+                            "cached": True,
+                            "answer_type": "from_cached_summary"
+                        },
+                        "file_type": "cached",
+                        "processing_steps": "cached_response"
+                    }
+            else:
+                # For non-questions, return the cached summary directly
+                logging.info(f"Returning cached summary for {file_name}")
+                return {
+                    "status": "success",
+                    "summary": combined_summary,
+                    "key_insights": [],
+                    "metadata": {
+                        "file_name": file_name,
+                        "cached": True,
+                        "summary_type": "from_cache"
+                    },
+                    "file_type": "cached",
+                    "processing_steps": "cached_summary"
+                }
+                
+        except Exception as e:
+            logging.warning(f"Error checking cached summary: {e}")
+            return None
+            
+        return None
+
+    async def _answer_from_cached_summary(self, question: str, cached_summary: str, file_name: str) -> Optional[str]:
+        """Generate an answer to a question using the cached document summary"""
+        try:
+            prompt = ChatPromptTemplate.from_template("""
+            Answer this question about the document "{file_name}" using the provided summary.
+            If the summary doesn't contain enough information to answer the question, say so clearly.
+
+            Question: {question}
+
+            Document Summary:
+            {cached_summary}
+
+            Provide a direct, factual answer based on the summary. Keep your response concise.
+            """)
+
+            chain = prompt | self.llm
+            response = await chain.ainvoke({
+                "question": question,
+                "cached_summary": cached_summary,
+                "file_name": file_name
+            })
+            
+            answer = response.content.strip()
+            
+            # Check if the answer indicates insufficient information
+            insufficient_indicators = ["doesn't contain", "not enough information", "cannot answer", "insufficient"]
+            if any(indicator in answer.lower() for indicator in insufficient_indicators):
+                return None  # Force re-processing
+                
+            return answer
+            
+        except Exception as e:
+            logging.warning(f"Error generating answer from cached summary: {e}")
+            return None
+
     async def process_file(self,
                           file_content: bytes,
                           file_name: str,
@@ -744,6 +847,14 @@ class AdvancedFileSummarizerAgent:
         logging.info(f"Processing file: {file_name} ({len(file_content)} bytes)")
 
         try:
+            conversation_history = conversation_history or []
+            
+            # Check if document has been processed before and if we can use cached summary
+            cached_response = await self._check_cached_summary(file_name, user_request, conversation_history)
+            if cached_response:
+                logging.info(f"Using cached summary for {file_name}")
+                return cached_response
+            
             # Initialize state
             initial_state: FileSummarizerState = {
                 "file_content": file_content,
@@ -752,7 +863,7 @@ class AdvancedFileSummarizerAgent:
                 "user_request": user_request,
                 "summary_mode": summary_mode,
                 "query": query,
-                "conversation_history": conversation_history or [],
+                "conversation_history": conversation_history,
                 "extracted_text": "",
                 "document_structure": {},
                 "chunks": [],

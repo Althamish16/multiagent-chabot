@@ -4,8 +4,9 @@ import { Button } from './ui/button';
 import { LogIn, LogOut, User } from 'lucide-react';
 
 export const LoginButton = () => {
-    const { user, isAuthenticated, loading, login, logout, error } = useAuth();
+    const { user, isAuthenticated, loading, login, logout, error, refreshProfile } = useAuth();
     const [isLoggingIn, setIsLoggingIn] = useState(false);
+    const [profileImageError, setProfileImageError] = useState(false);
 
     const handleLogin = async () => {
         setIsLoggingIn(true);
@@ -21,6 +22,19 @@ export const LoginButton = () => {
 
     const handleLogout = () => {
         logout();
+        setProfileImageError(false); // Reset error state on logout
+    };
+
+    const handleImageError = async () => {
+        setProfileImageError(true);
+        
+        // Try to refresh profile to get updated image
+        try {
+            await refreshProfile();
+            setProfileImageError(false); // Reset error if refresh succeeds
+        } catch (err) {
+            console.error('Failed to refresh profile after image error:', err);
+        }
     };
 
     if (loading) {
@@ -36,11 +50,12 @@ export const LoginButton = () => {
         return (
             <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
-                    {user.picture ? (
+                    {user.picture && !profileImageError ? (
                         <img 
                             src={user.picture} 
                             alt={user.name}
                             className="w-8 h-8 rounded-full"
+                            onError={handleImageError}
                         />
                     ) : (
                         <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center">

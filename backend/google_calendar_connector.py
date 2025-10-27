@@ -42,8 +42,7 @@ class GoogleCalendarConnector:
             service = self._get_calendar_service(access_token)
 
             # Detect timezone from datetime string
-            # If no 'Z' or timezone offset, use the calendar's default timezone (local)
-            # Otherwise extract or use UTC
+            # If no timezone specified, default to UTC
             def detect_timezone(dt_string):
                 if 'Z' in dt_string:
                     return 'UTC'
@@ -51,8 +50,8 @@ class GoogleCalendarConnector:
                     # Google Calendar will use the offset from the dateTime string
                     return None  # Let Google infer from the string
                 else:
-                    # No timezone specified - let Google Calendar use user's default timezone
-                    return None
+                    # No timezone specified - default to UTC
+                    return 'UTC'
 
             start_tz = detect_timezone(start_date)
             end_tz = detect_timezone(end_date)
@@ -401,7 +400,7 @@ class GoogleCalendarConnector:
                     elif '+' in dt_string or dt_string.count('-') > 2:
                         return None
                     else:
-                        return None
+                        return 'UTC'
 
                 start_tz = detect_timezone(start_date)
                 event['start'] = {'dateTime': start_date}
@@ -415,7 +414,7 @@ class GoogleCalendarConnector:
                     elif '+' in dt_string or dt_string.count('-') > 2:
                         return None
                     else:
-                        return None
+                        return 'UTC'
 
                 end_tz = detect_timezone(end_date)
                 event['end'] = {'dateTime': end_date}

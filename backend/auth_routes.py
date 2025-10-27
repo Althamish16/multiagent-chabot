@@ -9,6 +9,7 @@ from typing import Optional
 import json
 import logging
 import os
+from datetime import datetime
 
 # Import new auth system
 from auth_new import (
@@ -90,6 +91,48 @@ async def get_me(current_user: UserProfile = Depends(get_current_user)):
     Requires valid JWT token in Authorization header
     """
     return current_user.dict()
+
+
+@auth_router.post("/me/refresh")
+async def refresh_profile(current_user: UserProfile = Depends(get_current_user)):
+    """
+    Refresh user profile information from Google
+    Requires valid JWT token in Authorization header
+    """
+    try:
+        # Get the session
+        session_id = None
+        for sid, session in session_store._sessions.items():
+            if session.get('user_id') == current_user.id:
+                session_id = sid
+                break
+        
+        if not session_id:
+            raise HTTPException(status_code=401, detail="Session not found")
+        
+        session = session_store.get(session_id)
+        if not session:
+            raise HTTPException(status_code=401, detail="Session expired")
+        
+        google_token = session.get('google_access_token')
+        if not google_token:
+            raise HTTPException(status_code=401, detail="No Google access token")
+        
+        # Refresh user info from Google
+        user_info = google_auth.get_user_info(google_token)
+        
+        # Update session with new user data
+        session['user_data'] = user_info.dict()
+        session['last_accessed'] = datetime.utcnow()
+        
+        logger.info(f"Refreshed profile for user {user_info.email}")
+        return user_info.dict()
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Profile refresh failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to refresh profile")
 
 
 @auth_router.get("/status")

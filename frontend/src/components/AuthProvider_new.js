@@ -272,6 +272,21 @@ export const AuthProvider = ({ children }) => {
         }
     };
 
+    const refreshProfile = async () => {
+        try {
+            const response = await axios.post(`${AUTH_BASE}/auth/me/refresh`, {}, {
+                headers: getAuthHeaders()
+            });
+            setUser(response.data);
+            setError(null);
+            return response.data;
+        } catch (err) {
+            console.error('Profile refresh failed:', err);
+            // Don't set error for refresh failures, just log them
+            throw err;
+        }
+    };
+
     const value = {
         user,
         loading,
@@ -280,6 +295,7 @@ export const AuthProvider = ({ children }) => {
         login: handleLogin,
         logout: handleLogout,
         handleAuthCallback,
+        refreshProfile,
         getAuthHeaders
     };
 

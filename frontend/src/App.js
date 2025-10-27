@@ -6,7 +6,7 @@ import './App.css';
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000/api';
 
 function App() {
-  const { isAuthenticated, user, login, logout, loading: authLoading } = useAuth();
+  const { isAuthenticated, user, login, logout, loading: authLoading, refreshProfile } = useAuth();
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -14,6 +14,7 @@ function App() {
   const [attachedFile, setAttachedFile] = useState(null);
   const [chatSessions, setChatSessions] = useState([]);
   const [showSidebar, setShowSidebar] = useState(true);
+  const [profileImageError, setProfileImageError] = useState(false);
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
 
@@ -70,6 +71,23 @@ function App() {
       setMessages([]);
     }
   }, []);
+
+  const handleImageError = async () => {
+    setProfileImageError(true);
+    
+    // Try to refresh profile to get updated image
+    try {
+      await refreshProfile();
+      setProfileImageError(false); // Reset error if refresh succeeds
+    } catch (err) {
+      console.error('Failed to refresh profile after image error:', err);
+    }
+  };
+
+  // Reset image error when user changes
+  useEffect(() => {
+    setProfileImageError(false);
+  }, [user]);
 
   // Save session to list
   const saveSessionToList = useCallback((sessionId, firstMessage = '') => {
@@ -430,8 +448,8 @@ function App() {
 
                     {msg.sender === 'user' && (
                       <div className="message-avatar user-avatar">
-                        {user?.picture ? (
-                          <img src={user.picture} alt="You" />
+                        {user?.picture && !profileImageError ? (
+                          <img src={user.picture} alt="You" onError={handleImageError} />
                         ) : (
                           '👤'
                         )}

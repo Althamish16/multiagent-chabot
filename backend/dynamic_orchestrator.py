@@ -187,35 +187,40 @@ class DynamicMultiAgentOrchestrator:
         state["agents_to_invoke"] = result.get("agents_to_invoke", [])
         
         # Fallbacks: If user mentions agent-related keywords and agent not included, add it
-        user_request_lower = state["user_request"].lower()
-        keyword_map = {
-            "email_agent": [
-                "email", "mail", "inbox", "message", "unread", "gmail", "latest email", "recent email",
-                "send email", "draft email", "compose"
-            ],
-            "calendar_agent": [
-                "calendar", "meeting", "schedule", "reschedule", "appointment", "event", "availability",
-                "time slot", "book", "invite"
-            ],
-            "file_agent": [
-                "file", "document", "pdf", "docx", "ppt", "slide", "slides", "summarize", "extract",
-                "analyze", "report"
-            ],
-            "notes_agent": [
-                "note", "notes", "notebook", "remember", "save this", "to-do", "todo", "task list",
-                "minutes"
-            ]
-        }
+        # But don't override if LLM determined no action is needed
+        workflow_type = result.get("workflow_type", "")
+        if workflow_type == "no_action":
+            logging.info("LLM determined no action needed, skipping keyword fallbacks")
+        else:
+            user_request_lower = state["user_request"].lower()
+            keyword_map = {
+                "email_agent": [
+                    "email", "mail", "inbox", "message", "unread", "gmail", "latest email", "recent email",
+                    "send email", "draft email", "compose"
+                ],
+                "calendar_agent": [
+                    "calendar", "meeting", "schedule", "reschedule", "appointment", "event", "availability",
+                    "time slot", "book", "invite"
+                ],
+                "file_agent": [
+                    "file", "document", "pdf", "docx", "ppt", "slide", "slides", "summarize", "extract",
+                    "analyze", "report"
+                ],
+                "notes_agent": [
+                    "note", "notes", "notebook", "remember", "save this", "to-do", "todo", "task list",
+                    "minutes"
+                ]
+            }
 
-        detected_agents = []
-        for agent_name, keywords in keyword_map.items():
-            if any(keyword in user_request_lower for keyword in keywords):
-                detected_agents.append(agent_name)
+            detected_agents = []
+            for agent_name, keywords in keyword_map.items():
+                if any(keyword in user_request_lower for keyword in keywords):
+                    detected_agents.append(agent_name)
 
-        for agent_name in detected_agents:
-            if agent_name not in state["agents_to_invoke"]:
-                state["agents_to_invoke"].append(agent_name)
-                logging.info(f"Fallback triggered: Added {agent_name} due to keywords in request")
+            for agent_name in detected_agents:
+                if agent_name not in state["agents_to_invoke"]:
+                    state["agents_to_invoke"].append(agent_name)
+                    logging.info(f"Fallback triggered: Added {agent_name} due to keywords in request")
         
         logging.info(f"Analysis complete: {result}")
         logging.info(f"Final agents to invoke: {state['agents_to_invoke']}")
@@ -285,6 +290,7 @@ class DynamicMultiAgentOrchestrator:
         logging.info("Executing notes agent")
         agent_state = {
             "user_request": state["user_request"],
+            "access_token": state.get("access_token"),
             "context": state.get("agent_results", {}),
             "conversation_history": state.get("conversation_history", []),
             "results": {}
