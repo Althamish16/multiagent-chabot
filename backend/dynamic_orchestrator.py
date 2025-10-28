@@ -152,7 +152,7 @@ class DynamicMultiAgentOrchestrator:
                     "reasoning": "one or two sentences explaining the choice",
                     "workflow_type": "short label like 'email_search' | 'file_summary' | 'schedule_meeting' | 'notes_capture' | 'multi_step' | 'no_action'",
                     "agent_actions": {{
-                        "email_agent": {{"action": "read_inbox|list_unread|search|draft|approve|send|reply", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
+                        "email_agent": {{"action": "read|draft|approve|send|list|update", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
                         "calendar_agent": {{"action": "create_event|list_events|find_time|reschedule|cancel", "parameters": {{"date": "", "time": "", "duration_min": 0, "attendees": []}}}},
                         "file_agent": {{"action": "summarize|extract|analyze", "parameters": {{"file_hint": "", "sections": []}}}},
                         "notes_agent": {{"action": "create|append|search|list", "parameters": {{"title": "", "content": ""}}}}
@@ -393,7 +393,52 @@ class DynamicMultiAgentOrchestrator:
         agent_results = state.get("agent_results", {})
         analysis = state.get("analysis_result", {})
 
-        # Special handling for email agent results
+        # Check if multiple agents were involved
+        agents_used = list(agent_results.keys())
+        
+        # If multiple agents, compile all their results
+        if len(agents_used) > 1:
+            response_parts = []
+            
+            # Notes agent result
+            if "notes_agent" in agent_results:
+                notes_result = agent_results["notes_agent"]
+                if notes_result.get("status") == "success":
+                    response_parts.append(notes_result.get("message", "Notes saved successfully"))
+            
+            # Email agent result
+            if "email_agent" in agent_results:
+                email_result = agent_results["email_agent"]
+                if email_result.get("status") == "success":
+                    result_data = email_result.get("result", {})
+                    if "draft_id" in result_data:
+                        body_preview = result_data.get("body", "")[:300]
+                        response_parts.append(
+                            f"\n📧 **Email Draft Created**\n"
+                            f"**To:** {result_data.get('to', 'N/A')}\n"
+                            f"**Subject:** {result_data.get('subject', 'N/A')}\n"
+                            f"**Preview:** {body_preview}..."
+                        )
+                    else:
+                        response_parts.append(email_result.get("message", "Email processed"))
+            
+            # Calendar agent result
+            if "calendar_agent" in agent_results:
+                calendar_result = agent_results["calendar_agent"]
+                if calendar_result.get("status") == "success":
+                    response_parts.append(calendar_result.get("message", "Calendar updated"))
+            
+            # File agent result
+            if "file_agent" in agent_results:
+                file_result = agent_results["file_agent"]
+                if file_result.get("status") == "success":
+                    response_parts.append(file_result.get("message", "File processed"))
+            
+            if response_parts:
+                state["final_response"] = "\n\n".join(response_parts)
+                return state
+
+        # Special handling for email agent results (single agent)
         if "email_agent" in agent_results:
             email_result = agent_results["email_agent"]
             if email_result.get("status") == "success":
@@ -410,7 +455,24 @@ class DynamicMultiAgentOrchestrator:
                         "status": result_data.get("status"),
                         "created_at": result_data.get("created_at")
                     }
-                    state["final_response"] = email_result.get("message", "Email draft created successfully")
+                    
+                    # Create detailed response showing the actual draft content
+                    body_preview = result_data.get("body", "")[:500]
+                    draft_response = [
+                        "📧 **Email Draft Created**",
+                        f"**To:** {result_data.get('to', 'N/A')}",
+                        f"**Subject:** {result_data.get('subject', 'N/A')}",
+                        f"**Status:** {result_data.get('status', 'pending_approval')}",
+                        "\n**Email Content:**",
+                        body_preview
+                    ]
+                    
+                    if len(result_data.get("body", "")) > 500:
+                        draft_response.append("\n... (content truncated)")
+                    
+                    draft_response.append("\n✅ The draft is awaiting your approval.")
+                    
+                    state["final_response"] = "\n".join(draft_response)
                     return state
                 
                 # Email reading/listing
@@ -462,12 +524,18 @@ class DynamicMultiAgentOrchestrator:
         Agent results: {agent_results}
 
         Create a response that:
-        1. Summarizes what was accomplished
-        2. Provides clear information about each agent's contribution
-        3. Offers next steps or follow-up actions if relevant
-        4. Maintains a professional, helpful tone
+        1. Summarizes what was accomplished with SPECIFIC DETAILS from each agent
+        2. Shows the ACTUAL CONTENT that was created (document titles, URLs, key information)
+        3. If a document was created, include the document title and URL
+        4. If notes were saved, show what was saved
+        5. Provides clear information about each agent's contribution with REAL DATA
+        6. Offers next steps or follow-up actions if relevant
+        7. Maintains a professional, helpful tone
 
-        Keep the response concise but comprehensive.
+        IMPORTANT: Include actual content, not just generic descriptions like "2 agents" or "content saved".
+        Show what was actually created or retrieved.
+
+        Keep the response detailed but well-organized.
         """)
 
         chain = compile_prompt | self.llm

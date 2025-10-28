@@ -78,6 +78,16 @@ class EnhancedEmailAgent:
         # Analyze request to determine action
         action = await self._determine_action(user_request, state)
         
+        # Map orchestrator actions to agent actions
+        action_mapping = {
+            "read_inbox": "read",
+            "list_unread": "read",
+            "search": "read",
+            "reply": "draft"  # Reply can be handled as drafting a response
+        }
+        if action in action_mapping:
+            action = action_mapping[action]
+        
         try:
             if action == "draft":
                 return await self._handle_draft(state)
@@ -110,7 +120,7 @@ class EnhancedEmailAgent:
         """Determine what action to take based on request using LLM analysis"""
         
         # Explicit action provided (highest priority)
-        if "action" in state:
+        if "action" in state and state["action"]:
             return state["action"]
         
         # Try LLM-based analysis first
@@ -256,9 +266,24 @@ class EnhancedEmailAgent:
             if flags:
                 safety_summary = f"\n\n⚠️ Safety Checks: {len(flags)} issue(s) found:\n" + "\n".join(f"  - {flag}" for flag in flags[:3])
         
+        # Create detailed response with actual draft content
+        body_preview = draft.body[:1000] if len(draft.body) > 1000 else draft.body
+        message_parts = [
+            "📧 **Email Draft Created**",
+            f"**To:** {draft.to}",
+            f"**Subject:** {draft.subject}",
+            f"\n**Email Content:**",
+            body_preview
+        ]
+        
+        if len(draft.body) > 500:
+            message_parts.append("\n... (content truncated)")
+        
+        message_parts.append(f"\n✅ **Status:** Awaiting approval{safety_summary}")
+        
         return {
             "status": "success",
-            "message": f"Email draft created and awaiting approval{safety_summary}",
+            "message": "\n".join(message_parts),
             "result": {
                 "draft_id": draft.id,
                 "to": draft.to,

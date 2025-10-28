@@ -168,13 +168,32 @@ class EnhancedNotesAgent:
 
             collaboration_needed = parsed_response.get("collaboration_needed", [])
             
+            # Create a detailed message with the actual content
+            content_preview = content[:500] if len(content) > 500 else content
+            message_parts = [
+                f"📝 **Document Created in {service_name}**",
+                f"**Title:** {result['title']}",
+                f"**URL:** {result.get('url', 'N/A')}",
+                f"\n**Content:**",
+                content_preview
+            ]
+            
+            if len(content) > 500:
+                message_parts.append("\n... (content truncated)")
+            
             return {
                 "status": "success",
-                "result": result,
-                "message": f"📝 Document '{result['title']}' created successfully in {service_name}",
+                "result": {
+                    **result,
+                    "content": content,  # Include full content in result
+                    "content_preview": content_preview
+                },
+                "message": "\n".join(message_parts),
                 "collaboration_data": {
                     "document_url": result.get("url", ""),
                     "document_id": result.get("id", ""),
+                    "document_title": result.get("title", ""),
+                    "content": content,
                     "next_agents": collaboration_needed
                 }
             }

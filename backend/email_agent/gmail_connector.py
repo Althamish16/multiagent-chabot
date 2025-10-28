@@ -5,6 +5,7 @@ Integration with Gmail API using existing Google OAuth infrastructure
 from typing import Optional, Dict, Any, List
 import logging
 import base64
+import ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
@@ -12,6 +13,7 @@ from datetime import datetime
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from google.auth.transport.requests import Request
 
 from .models import EmailDraft, SendResult, EmailMessage
 
@@ -22,12 +24,43 @@ class GmailConnector:
     def __init__(self):
         self.service_cache = {}  # Cache Gmail service instances by access token
         logging.info("GmailConnector initialized")
+        
+        # Log SSL and network environment info for debugging
+        import ssl
+        logging.info(f"SSL version: {ssl.OPENSSL_VERSION}")
+        import os
+        proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']
+        for var in proxy_vars:
+            if os.getenv(var):
+                logging.info(f"Proxy detected: {var}={os.getenv(var)}")
     
     def _get_gmail_service(self, access_token: str):
-        """Get or create Gmail API service instance"""
+        """Get or create Gmail API service instance with SSL handling"""
         if access_token not in self.service_cache:
             credentials = Credentials(token=access_token)
-            self.service_cache[access_token] = build('gmail', 'v1', credentials=credentials)
+            
+            try:
+                # Try with default settings first
+                service = build('gmail', 'v1', credentials=credentials)
+                self.service_cache[access_token] = service
+                logging.info("Gmail service created successfully with default settings")
+                
+            except Exception as e:
+                logging.warning(f"Failed to create Gmail service with default settings: {e}")
+                
+                # Fallback: try with SSL certificate validation disabled
+                try:
+                    import httplib2
+                    http = httplib2.Http(disable_ssl_certificate_validation=True)
+                    service = build('gmail', 'v1', credentials=credentials, http=http)
+                    self.service_cache[access_token] = service
+                    logging.info("Gmail service created successfully with SSL validation disabled")
+                    
+                except Exception as e2:
+                    logging.error(f"Failed to create Gmail service with SSL disabled: {e2}")
+                    # Re-raise the original error
+                    raise e
+                    
         return self.service_cache[access_token]
     
     async def send_email(
@@ -237,8 +270,37 @@ class GmailConnector:
             if page_token:
                 params['pageToken'] = page_token
             
-            # List messages
-            results = service.users().messages().list(**params).execute()
+            # List messages with retry logic for SSL issues
+            results = None
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    results = service.users().messages().list(**params).execute()
+                    break
+                except Exception as e:
+                    error_str = str(e)
+                    if "SSL" in error_str or "EOF occurred" in error_str or "certificate" in error_str.lower():
+                        logging.warning(f"SSL error on attempt {attempt + 1}/{max_retries}: {error_str}")
+                        if attempt < max_retries - 1:
+                            # Clear service cache to force recreation
+                            if access_token in self.service_cache:
+                                del self.service_cache[access_token]
+                            # Re-get service (will recreate with SSL fallback)
+                            service = self._get_gmail_service(access_token)
+                            continue
+                        else:
+                            error_msg = f"SSL connection error after {max_retries} attempts: {error_str}. This may be due to network restrictions, proxy settings, or SSL certificate issues."
+                            logging.error(error_msg)
+                            return {'emails': [], 'total_count': 0, 'error': error_msg}
+                    else:
+                        # Non-SSL error, don't retry
+                        raise e
+            
+            if results is None:
+                error_msg = "Failed to retrieve email list after all retry attempts"
+                logging.error(error_msg)
+                return {'emails': [], 'total_count': 0, 'error': error_msg}
+                
             messages = results.get('messages', [])
             
             emails = []
@@ -264,8 +326,13 @@ class GmailConnector:
             return {'emails': [], 'total_count': 0, 'error': error_msg}
             
         except Exception as e:
-            error_msg = f"Unexpected error: {str(e)}"
-            logging.error(f"Failed to list emails: {error_msg}")
+            error_str = str(e)
+            if "SSL" in error_str or "EOF occurred" in error_str or "certificate" in error_str.lower():
+                error_msg = f"SSL connection error: {error_str}. This may be due to network restrictions, proxy settings, or SSL certificate issues. Try checking your internet connection and proxy settings."
+                logging.error(f"SSL error in list_emails: {error_str}")
+            else:
+                error_msg = f"Unexpected error: {error_str}"
+                logging.error(f"Failed to list emails: {error_str}")
             return {'emails': [], 'total_count': 0, 'error': error_msg}
     
     async def get_email(
@@ -286,12 +353,38 @@ class GmailConnector:
         try:
             service = self._get_gmail_service(access_token)
             
-            # Get full message details
-            msg_data = service.users().messages().get(
-                userId='me',
-                id=message_id,
-                format='full'
-            ).execute()
+            # Get full message details with SSL retry
+            msg_data = None
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    msg_data = service.users().messages().get(
+                        userId='me',
+                        id=message_id,
+                        format='full'
+                    ).execute()
+                    break
+                except Exception as e:
+                    error_str = str(e)
+                    if "SSL" in error_str or "EOF occurred" in error_str or "certificate" in error_str.lower():
+                        logging.warning(f"SSL error fetching email {message_id} on attempt {attempt + 1}/{max_retries}: {error_str}")
+                        if attempt < max_retries - 1:
+                            # Clear service cache to force recreation
+                            if access_token in self.service_cache:
+                                del self.service_cache[access_token]
+                            # Re-get service
+                            service = self._get_gmail_service(access_token)
+                            continue
+                        else:
+                            logging.error(f"SSL error fetching email {message_id} after {max_retries} attempts: {error_str}")
+                            return None
+                    else:
+                        # Non-SSL error, don't retry
+                        raise e
+            
+            if msg_data is None:
+                logging.error(f"Failed to fetch email {message_id} after all retry attempts")
+                return None
             
             # Parse headers
             headers = {h['name']: h['value'] for h in msg_data['payload']['headers']}

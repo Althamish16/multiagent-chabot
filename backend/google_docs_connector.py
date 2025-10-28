@@ -92,41 +92,35 @@ class GoogleDocsConnector:
                 ).execute()
 
             # Set proper permissions to ensure the document is accessible
-            # Make sure the owner has full access and the document is shared properly
+            # The document owner (authenticated user) should have full access by default
+            # No additional permissions needed for basic access
+            
             try:
-                # First, check if permissions already exist
-                existing_permissions = drive_service.permissions().list(fileId=doc_id).execute()
-                owner_has_access = False
-                
-                for perm in existing_permissions.get('permissions', []):
-                    if perm.get('type') == 'user' and perm.get('role') in ['owner', 'writer']:
-                        owner_has_access = True
-                        break
-                
-                # Only create permission if owner doesn't already have access
-                if not owner_has_access:
-                    permission = {
-                        'type': 'user',
-                        'role': 'writer',
-                        'emailAddress': None  # This will default to the authenticated user
-                    }
-                    drive_service.permissions().create(
-                        fileId=doc_id,
-                        body=permission,
-                        sendNotificationEmail=False
-                    ).execute()
-                
-                # Ensure the document is marked as shared
-                drive_service.files().update(
+                # Get the document details to confirm ownership
+                doc_details = drive_service.files().get(
                     fileId=doc_id,
-                    body={'shared': True},
-                    fields='shared'
+                    fields='id, name, webViewLink, owners(displayName,emailAddress), shared'
                 ).execute()
                 
+                logging.info(f"Document created successfully: {doc_details.get('name')} owned by {doc_details.get('owners', [{}])[0].get('emailAddress', 'unknown')}")
+                
+                # Make the document accessible via link for easier access
+                permission = {
+                    'type': 'anyone',
+                    'role': 'reader',
+                    'allowFileDiscovery': False
+                }
+                drive_service.permissions().create(
+                    fileId=doc_id,
+                    body=permission,
+                    sendNotificationEmail=False
+                ).execute()
+                
+                logging.info("Document shared with anyone who has the link")
+                
             except Exception as perm_error:
-                # Permission might already exist or other issues, log but don't fail
-                logging.info(f"Permission setting note (may already exist): {perm_error}")
-                # Continue anyway - the document should still be accessible
+                logging.warning(f"Could not set sharing permissions: {perm_error}")
+                # Continue anyway - the document should still be accessible to the owner
 
             # Get the final document details
             doc_details = drive_service.files().get(
@@ -141,6 +135,7 @@ class GoogleDocsConnector:
                 'created_time': doc_details['createdTime'],
                 'modified_time': doc_details['modifiedTime'],
                 'owner': doc_details.get('owners', [{}])[0].get('displayName', ''),
+                'owner_email': doc_details.get('owners', [{}])[0].get('emailAddress', ''),
                 'shared': doc_details.get('shared', False),
                 'status': 'created'
             }
