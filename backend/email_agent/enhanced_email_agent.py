@@ -6,6 +6,14 @@ from typing import Dict, Any, Optional, List
 import logging
 from datetime import datetime
 
+from openai import AsyncAzureOpenAI
+from config import (
+    AZURE_OPENAI_API_KEY,
+    AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_VERSION,
+    AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+)
+
 from .email_drafter import email_drafter
 from .approval_workflow import approval_workflow
 from .gmail_connector import gmail_connector
@@ -29,6 +37,13 @@ class EnhancedEmailAgent:
     """
     
     def __init__(self):
+        self.llm = AsyncAzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_version=AZURE_OPENAI_API_VERSION,
+        )
+        self.deployment_name = AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+        
         self.drafter = email_drafter
         self.workflow = approval_workflow
         self.connector = gmail_connector
@@ -92,18 +107,105 @@ class EnhancedEmailAgent:
             }
     
     async def _determine_action(self, user_request: str, state: Dict[str, Any]) -> str:
-        """Determine what action to take based on request"""
+        """Determine what action to take based on request using LLM analysis"""
         
-        # Explicit action provided
+        # Explicit action provided (highest priority)
         if "action" in state:
             return state["action"]
+        
+        # Try LLM-based analysis first
+        try:
+            llm_action = await self._determine_action_llm(user_request, state)
+            if llm_action and llm_action != "unknown":
+                logging.info(f"LLM determined action: {llm_action}")
+                return llm_action
+        except Exception as e:
+            logging.warning(f"LLM action determination failed: {e}, falling back to keyword matching")
+        
+        # Fallback to keyword matching
+        return await self._determine_action_keywords(user_request, state)
+    
+    async def _determine_action_llm(self, user_request: str, state: Dict[str, Any]) -> str:
+        """Use LLM to intelligently determine the appropriate email action"""
+        
+        conversation_history = state.get("conversation_history", [])
+        session_id = state.get("session_id")
+        
+        # Get recent conversation context (last 3 messages)
+        recent_context = ""
+        if conversation_history:
+            recent_messages = conversation_history[-3:]
+            recent_context = "\n".join([f"- {msg}" for msg in recent_messages])
+        
+        # Check for existing drafts in session to provide context
+        draft_context = ""
+        if session_id:
+            try:
+                drafts = await self.storage.get_drafts_by_session(session_id)
+                if drafts:
+                    draft_statuses = {}
+                    for draft in drafts[-3:]:  # Last 3 drafts
+                        status = draft.status.value if hasattr(draft.status, 'value') else draft.status
+                        draft_statuses[draft.id] = status
+                    
+                    draft_context = f"Recent drafts: {draft_statuses}"
+            except Exception as e:
+                logging.debug(f"Could not load draft context: {e}")
+        
+        analysis_prompt = f"""
+        Analyze this user request and determine the most appropriate email action.
+
+        Available actions:
+        - draft: Create a new email draft
+        - approve: Approve a pending email draft
+        - send: Send an approved email draft
+        - list: Show/list email drafts
+        - update: Modify an existing draft
+        - read: Read/fetch emails from inbox
+
+        Context:
+        - Recent conversation: {recent_context}
+        - Draft status: {draft_context}
+
+        User request: "{user_request}"
+
+        Respond with ONLY the action name (draft/approve/send/list/update/read). If unclear, respond with "draft".
+        """
+        
+        try:
+            response = await self.llm.chat.completions.create(
+                model=self.deployment_name,
+                messages=[
+                    {"role": "system", "content": "You are an email action classifier. Respond with only the action name."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                max_tokens=10,
+                temperature=0.1
+            )
+            
+            action = response.choices[0].message.content.strip().lower()
+            
+            # Validate the action is one of our expected actions
+            valid_actions = ["draft", "approve", "send", "list", "update", "read"]
+            if action in valid_actions:
+                return action
+            else:
+                logging.warning(f"LLM returned invalid action: {action}")
+                return "unknown"
+                
+        except Exception as e:
+            logging.error(f"LLM action determination error: {e}")
+            return "unknown"
+    
+    async def _determine_action_keywords(self, user_request: str, state: Dict[str, Any]) -> str:
+        """Fallback keyword-based action determination"""
         
         # Analyze request text
         request_lower = user_request.lower()
         
         if any(word in request_lower for word in ["approve", "accept", "confirm send"]):
             return "approve"
-        elif any(word in request_lower for word in ["send email", "send the email", "send it"]):
+        elif any(phrase in request_lower for phrase in ["send email", "send the email", "send it", "send mail", "send the mail"]):
             return "send"
         elif any(word in request_lower for word in ["list", "show", "drafts", "pending"]):
             return "list"
@@ -173,6 +275,21 @@ class EnhancedEmailAgent:
         
         draft_id = state.get("draft_id")
         user_id = state.get("user_id", "anonymous")
+        session_id = state.get("session_id")
+        
+        # If no draft_id provided, find the most recent pending draft
+        if not draft_id and session_id:
+            drafts = await self.storage.get_drafts_by_session(session_id, status=DraftStatus.PENDING_APPROVAL)
+            if drafts:
+                # Get the most recent pending draft
+                draft_id = max(drafts, key=lambda d: d.created_at).id
+                logging.info(f"Using most recent pending draft for approval: {draft_id}")
+            else:
+                return {
+                    "status": "error",
+                    "message": "No pending drafts found to approve.",
+                    "result": {}
+                }
         
         if not draft_id:
             return {
@@ -208,6 +325,28 @@ class EnhancedEmailAgent:
         draft_id = state.get("draft_id")
         access_token = state.get("access_token")
         user_id = state.get("user_id", "anonymous")
+        session_id = state.get("session_id")
+        
+        # If no draft_id provided, find the most recent draft (approved or pending)
+        if not draft_id and session_id:
+            # First try approved drafts
+            drafts = await self.storage.get_drafts_by_session(session_id, status=DraftStatus.APPROVED)
+            if drafts:
+                # Get the most recent approved draft
+                draft_id = max(drafts, key=lambda d: d.created_at).id
+                logging.info(f"Using most recent approved draft: {draft_id}")
+            else:
+                # If no approved drafts, check for pending approval drafts
+                drafts = await self.storage.get_drafts_by_session(session_id, status=DraftStatus.PENDING_APPROVAL)
+                if drafts:
+                    draft_id = max(drafts, key=lambda d: d.created_at).id
+                    logging.info(f"Using most recent pending draft: {draft_id}")
+                else:
+                    return {
+                        "status": "error",
+                        "message": "No drafts found to send. Please create an email draft first.",
+                        "result": {}
+                    }
         
         if not draft_id:
             return {
@@ -223,12 +362,45 @@ class EnhancedEmailAgent:
                 "result": {}
             }
         
-        # Send the email
+        # Load the draft to check its status
+        draft = await self.storage.get_draft(draft_id)
+        if not draft:
+            return {
+                "status": "error",
+                "message": f"Draft {draft_id} not found",
+                "result": {}
+            }
+        
+        # Auto-approve if the draft is pending approval
+        current_status = draft.status.value if hasattr(draft.status, 'value') else draft.status
+        if current_status == "pending_approval":
+            logging.info(f"Auto-approving pending draft {draft_id} before sending")
+            try:
+                # Create approval decision
+                decision = ApprovalDecision(
+                    draft_id=draft_id,
+                    user_id=user_id,
+                    approved=True,
+                    feedback="Auto-approved for sending"
+                )
+                
+                # Process approval
+                draft = await self.workflow.process_decision(decision)
+                logging.info(f"Draft {draft_id} auto-approved successfully")
+            except Exception as e:
+                logging.error(f"Failed to auto-approve draft {draft_id}: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Failed to approve draft before sending: {str(e)}",
+                    "result": {}
+                }
+        
+        # Now send the approved draft
         result = await self.worker.send_approved_draft(
             draft_id=draft_id,
             access_token=access_token,
             user_id=user_id,
-            auto_approve=False  # Require explicit approval
+            auto_approve=False  # Already approved above
         )
         
         if result.success:

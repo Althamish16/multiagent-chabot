@@ -135,7 +135,7 @@ class DynamicMultiAgentOrchestrator:
         - calendar_agent — schedule/reschedule/cancel meetings, find availability, list events
         - notes_agent — create/update/search notes, action items, meeting minutes
         - file_agent — read/summarize/extract/analyze documents and files
-        - email_agent — read inbox/unread/search, draft/send/reply/forward emails
+        - email_agent — read inbox/unread/search, draft/approve/send/reply/forward emails
 
         Guidance:
         - Select the minimal set of agents required to satisfy the request.
@@ -144,6 +144,7 @@ class DynamicMultiAgentOrchestrator:
         - If nothing actionable is required, return an empty list for agents_to_invoke.
         - Prefer single-agent workflows when possible.
         - Consider available files when deciding whether to invoke file_agent.
+        - For email actions: use "approve" when user wants to approve a draft, "send" when user wants to send an already approved email.
 
         Output format (STRICT JSON only; no prose, no markdown, no code fences):
                 {{
@@ -151,7 +152,7 @@ class DynamicMultiAgentOrchestrator:
                     "reasoning": "one or two sentences explaining the choice",
                     "workflow_type": "short label like 'email_search' | 'file_summary' | 'schedule_meeting' | 'notes_capture' | 'multi_step' | 'no_action'",
                     "agent_actions": {{
-                        "email_agent": {{"action": "read_inbox|list_unread|search|draft|send|reply", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
+                        "email_agent": {{"action": "read_inbox|list_unread|search|draft|approve|send|reply", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
                         "calendar_agent": {{"action": "create_event|list_events|find_time|reschedule|cancel", "parameters": {{"date": "", "time": "", "duration_min": 0, "attendees": []}}}},
                         "file_agent": {{"action": "summarize|extract|analyze", "parameters": {{"file_hint": "", "sections": []}}}},
                         "notes_agent": {{"action": "create|append|search|list", "parameters": {{"title": "", "content": ""}}}}
@@ -373,6 +374,11 @@ class DynamicMultiAgentOrchestrator:
             "access_token": state.get("access_token"),
             "conversation_history": state.get("conversation_history", []),
             "context": state.get("agent_results", {}),
+            "action": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("action"),
+            "recipient": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("recipient"),
+            "subject": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("subject"),
+            "tone": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("tone"),
+            "query": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("query"),
         }
 
         result = await self.email_agent.process_request(agent_state)

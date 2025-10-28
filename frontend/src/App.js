@@ -9,7 +9,7 @@ import './App.css';
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000/api';
 
 function App() {
-  const { isAuthenticated, user, login, logout, loading: authLoading, refreshProfile } = useAuth();
+  const { isAuthenticated, user, login, logout, loading: authLoading } = useAuth();
   const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -84,13 +84,8 @@ function App() {
   const handleImageError = async () => {
     setProfileImageError(true);
     
-    // Try to refresh profile to get updated image
-    try {
-      await refreshProfile();
-      setProfileImageError(false); // Reset error if refresh succeeds
-    } catch (err) {
-      console.error('Failed to refresh profile after image error:', err);
-    }
+    // Note: Removed refreshProfile call as it won't fix broken image URLs
+    // The profile refresh is for updating user data, not fixing image loading issues
   };
 
   // Reset image error when user changes

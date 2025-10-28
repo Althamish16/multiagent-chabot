@@ -1170,7 +1170,11 @@ async def get_draft(
         if not draft:
             raise HTTPException(status_code=404, detail="Draft not found")
         
-        return JSONResponse(content=draft.to_dict())
+        draft_dict = draft.to_dict()
+        # Map 'id' to 'draft_id' for frontend compatibility
+        draft_dict['draft_id'] = draft_dict.pop('id')
+        
+        return JSONResponse(content=draft_dict)
         
     except HTTPException:
         raise

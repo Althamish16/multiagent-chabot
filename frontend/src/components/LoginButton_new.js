@@ -4,7 +4,7 @@ import { Button } from './ui/button';
 import { LogIn, LogOut, User } from 'lucide-react';
 
 export const LoginButton = () => {
-    const { user, isAuthenticated, loading, login, logout, error, refreshProfile } = useAuth();
+    const { user, isAuthenticated, loading, login, logout, error } = useAuth();
     const [isLoggingIn, setIsLoggingIn] = useState(false);
     const [profileImageError, setProfileImageError] = useState(false);
 
@@ -28,13 +28,8 @@ export const LoginButton = () => {
     const handleImageError = async () => {
         setProfileImageError(true);
         
-        // Try to refresh profile to get updated image
-        try {
-            await refreshProfile();
-            setProfileImageError(false); // Reset error if refresh succeeds
-        } catch (err) {
-            console.error('Failed to refresh profile after image error:', err);
-        }
+        // Note: Removed refreshProfile call as it won't fix broken image URLs
+        // The profile refresh is for updating user data, not fixing image loading issues
     };
 
     if (loading) {

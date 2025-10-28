@@ -102,17 +102,21 @@ export function EmailDraftModal({ draft, onClose, onSend, onUpdate }) {
       }
 
       const token = localStorage.getItem('auth_token');
-      
-      // Approve the draft
+
+      // First, approve the draft
       await axios.post(
-        `${API_BASE_URL}/email/send`,
-        { draft_id: draft.draft_id },
+        `${API_BASE_URL}/email/approve`,
+        {
+          draft_id: draft.draft_id,
+          feedback: "Approved for sending",
+          modifications: null
+        },
         {
           headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         }
       );
 
-      // Send the draft
+      // Then send the approved draft
       const response = await axios.post(
         `${API_BASE_URL}/email/send`,
         { draft_id: draft.draft_id },
