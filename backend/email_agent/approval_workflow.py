@@ -65,7 +65,7 @@ class ApprovalWorkflow:
         
         logging.info(f"Processing approval decision for draft {decision.draft_id}: approved={decision.approved}")
         
-        # Load draft
+        # Load draft (searches all sessions automatically)
         draft = await draft_storage.get_draft(decision.draft_id)
         if not draft:
             raise ValueError(f"Draft {decision.draft_id} not found")

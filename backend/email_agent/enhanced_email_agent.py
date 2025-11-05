@@ -6,6 +6,14 @@ from typing import Dict, Any, Optional, List
 import logging
 from datetime import datetime
 
+from openai import AsyncAzureOpenAI
+from config import (
+    AZURE_OPENAI_API_KEY,
+    AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_VERSION,
+    AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+)
+
 from .email_drafter import email_drafter
 from .approval_workflow import approval_workflow
 from .gmail_connector import gmail_connector
@@ -29,6 +37,13 @@ class EnhancedEmailAgent:
     """
     
     def __init__(self):
+        self.llm = AsyncAzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_version=AZURE_OPENAI_API_VERSION,
+        )
+        self.deployment_name = AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
+        
         self.drafter = email_drafter
         self.workflow = approval_workflow
         self.connector = gmail_connector
@@ -63,6 +78,16 @@ class EnhancedEmailAgent:
         # Analyze request to determine action
         action = await self._determine_action(user_request, state)
         
+        # Map orchestrator actions to agent actions
+        action_mapping = {
+            "read_inbox": "read",
+            "list_unread": "read",
+            "search": "read",
+            "reply": "draft"  # Reply can be handled as drafting a response
+        }
+        if action in action_mapping:
+            action = action_mapping[action]
+        
         try:
             if action == "draft":
                 return await self._handle_draft(state)
@@ -92,18 +117,105 @@ class EnhancedEmailAgent:
             }
     
     async def _determine_action(self, user_request: str, state: Dict[str, Any]) -> str:
-        """Determine what action to take based on request"""
+        """Determine what action to take based on request using LLM analysis"""
         
-        # Explicit action provided
-        if "action" in state:
+        # Explicit action provided (highest priority)
+        if "action" in state and state["action"]:
             return state["action"]
+        
+        # Try LLM-based analysis first
+        try:
+            llm_action = await self._determine_action_llm(user_request, state)
+            if llm_action and llm_action != "unknown":
+                logging.info(f"LLM determined action: {llm_action}")
+                return llm_action
+        except Exception as e:
+            logging.warning(f"LLM action determination failed: {e}, falling back to keyword matching")
+        
+        # Fallback to keyword matching
+        return await self._determine_action_keywords(user_request, state)
+    
+    async def _determine_action_llm(self, user_request: str, state: Dict[str, Any]) -> str:
+        """Use LLM to intelligently determine the appropriate email action"""
+        
+        conversation_history = state.get("conversation_history", [])
+        session_id = state.get("session_id")
+        
+        # Get recent conversation context (last 3 messages)
+        recent_context = ""
+        if conversation_history:
+            recent_messages = conversation_history[-3:]
+            recent_context = "\n".join([f"- {msg}" for msg in recent_messages])
+        
+        # Check for existing drafts in session to provide context
+        draft_context = ""
+        if session_id:
+            try:
+                drafts = await self.storage.get_drafts_by_session(session_id)
+                if drafts:
+                    draft_statuses = {}
+                    for draft in drafts[-3:]:  # Last 3 drafts
+                        status = draft.status.value if hasattr(draft.status, 'value') else draft.status
+                        draft_statuses[draft.id] = status
+                    
+                    draft_context = f"Recent drafts: {draft_statuses}"
+            except Exception as e:
+                logging.debug(f"Could not load draft context: {e}")
+        
+        analysis_prompt = f"""
+        Analyze this user request and determine the most appropriate email action.
+
+        Available actions:
+        - draft: Create a new email draft
+        - approve: Approve a pending email draft
+        - send: Send an approved email draft
+        - list: Show/list email drafts
+        - update: Modify an existing draft
+        - read: Read/fetch emails from inbox
+
+        Context:
+        - Recent conversation: {recent_context}
+        - Draft status: {draft_context}
+
+        User request: "{user_request}"
+
+        Respond with ONLY the action name (draft/approve/send/list/update/read). If unclear, respond with "draft".
+        """
+        
+        try:
+            response = await self.llm.chat.completions.create(
+                model=self.deployment_name,
+                messages=[
+                    {"role": "system", "content": "You are an email action classifier. Respond with only the action name."},
+                    {"role": "user", "content": analysis_prompt}
+                ],
+                max_tokens=10,
+                temperature=0.1
+            )
+            
+            action = response.choices[0].message.content.strip().lower()
+            
+            # Validate the action is one of our expected actions
+            valid_actions = ["draft", "approve", "send", "list", "update", "read"]
+            if action in valid_actions:
+                return action
+            else:
+                logging.warning(f"LLM returned invalid action: {action}")
+                return "unknown"
+                
+        except Exception as e:
+            logging.error(f"LLM action determination error: {e}")
+            return "unknown"
+    
+    async def _determine_action_keywords(self, user_request: str, state: Dict[str, Any]) -> str:
+        """Fallback keyword-based action determination"""
         
         # Analyze request text
         request_lower = user_request.lower()
         
         if any(word in request_lower for word in ["approve", "accept", "confirm send"]):
             return "approve"
-        elif any(word in request_lower for word in ["send email", "send the email", "send it"]):
+        elif any(phrase in request_lower for phrase in ["send email", "send the email", "send it", "send mail", "send the mail"]):
             return "send"
         elif any(word in request_lower for word in ["list", "show", "drafts", "pending"]):
             return "list"
@@ -154,15 +266,30 @@ class EnhancedEmailAgent:
             if flags:
                 safety_summary = f"\n\n⚠️ Safety Checks: {len(flags)} issue(s) found:\n" + "\n".join(f"  - {flag}" for flag in flags[:3])
         
+        # Create detailed response with actual draft content
+        body_preview = draft.body[:1000] if len(draft.body) > 1000 else draft.body
+        message_parts = [
+            "📧 **Email Draft Created**",
+            f"**To:** {draft.to}",
+            f"**Subject:** {draft.subject}",
+            f"\n**Email Content:**",
+            body_preview
+        ]
+        
+        if len(draft.body) > 500:
+            message_parts.append("\n... (content truncated)")
+        
+        message_parts.append(f"\n✅ **Status:** Awaiting approval{safety_summary}")
+        
         return {
             "status": "success",
-            "message": f"Email draft created and awaiting approval{safety_summary}",
+            "message": "\n".join(message_parts),
             "result": {
                 "draft_id": draft.id,
                 "to": draft.to,
                 "subject": draft.subject,
                 "body": draft.body,
-                "status": draft.status.value,
+                "status": draft.status.value if hasattr(draft.status, 'value') else draft.status,
                 "safety_checks": draft.safety_checks,
                 "created_at": draft.created_at.isoformat()
             }
@@ -173,6 +300,21 @@ class EnhancedEmailAgent:
         
         draft_id = state.get("draft_id")
         user_id = state.get("user_id", "anonymous")
+        session_id = state.get("session_id")
+        
+        # If no draft_id provided, find the most recent pending draft
+        if not draft_id and session_id:
+            drafts = await self.storage.get_drafts_by_session(session_id, status=DraftStatus.PENDING_APPROVAL)
+            if drafts:
+                # Get the most recent pending draft
+                draft_id = max(drafts, key=lambda d: d.created_at).id
+                logging.info(f"Using most recent pending draft for approval: {draft_id}")
+            else:
+                return {
+                    "status": "error",
+                    "message": "No pending drafts found to approve.",
+                    "result": {}
+                }
         
         if not draft_id:
             return {
@@ -197,7 +339,7 @@ class EnhancedEmailAgent:
             "message": f"Draft {draft_id} approved. Ready to send.",
             "result": {
                 "draft_id": draft.id,
-                "status": draft.status.value,
+                "status": draft.status.value if hasattr(draft.status, 'value') else draft.status,
                 "approved_at": draft.approved_at.isoformat() if draft.approved_at else None
             }
         }
@@ -208,6 +350,28 @@ class EnhancedEmailAgent:
         draft_id = state.get("draft_id")
         access_token = state.get("access_token")
         user_id = state.get("user_id", "anonymous")
+        session_id = state.get("session_id")
+        
+        # If no draft_id provided, find the most recent draft (approved or pending)
+        if not draft_id and session_id:
+            # First try approved drafts
+            drafts = await self.storage.get_drafts_by_session(session_id, status=DraftStatus.APPROVED)
+            if drafts:
+                # Get the most recent approved draft
+                draft_id = max(drafts, key=lambda d: d.created_at).id
+                logging.info(f"Using most recent approved draft: {draft_id}")
+            else:
+                # If no approved drafts, check for pending approval drafts
+                drafts = await self.storage.get_drafts_by_session(session_id, status=DraftStatus.PENDING_APPROVAL)
+                if drafts:
+                    draft_id = max(drafts, key=lambda d: d.created_at).id
+                    logging.info(f"Using most recent pending draft: {draft_id}")
+                else:
+                    return {
+                        "status": "error",
+                        "message": "No drafts found to send. Please create an email draft first.",
+                        "result": {}
+                    }
         
         if not draft_id:
             return {
@@ -223,12 +387,45 @@ class EnhancedEmailAgent:
                 "result": {}
             }
         
-        # Send the email
+        # Load the draft to check its status
+        draft = await self.storage.get_draft(draft_id)
+        if not draft:
+            return {
+                "status": "error",
+                "message": f"Draft {draft_id} not found",
+                "result": {}
+            }
+        
+        # Auto-approve if the draft is pending approval
+        current_status = draft.status.value if hasattr(draft.status, 'value') else draft.status
+        if current_status == "pending_approval":
+            logging.info(f"Auto-approving pending draft {draft_id} before sending")
+            try:
+                # Create approval decision
+                decision = ApprovalDecision(
+                    draft_id=draft_id,
+                    user_id=user_id,
+                    approved=True,
+                    feedback="Auto-approved for sending"
+                )
+                
+                # Process approval
+                draft = await self.workflow.process_decision(decision)
+                logging.info(f"Draft {draft_id} auto-approved successfully")
+            except Exception as e:
+                logging.error(f"Failed to auto-approve draft {draft_id}: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Failed to approve draft before sending: {str(e)}",
+                    "result": {}
+                }
+        
+        # Now send the approved draft
         result = await self.worker.send_approved_draft(
             draft_id=draft_id,
             access_token=access_token,
             user_id=user_id,
-            auto_approve=False  # Require explicit approval
+            auto_approve=False  # Already approved above
         )
         
         if result.success:
@@ -272,7 +469,7 @@ class EnhancedEmailAgent:
                 "draft_id": d.id,
                 "to": d.to,
                 "subject": d.subject,
-                "status": d.status.value,
+                "status": d.status.value if hasattr(d.status, 'value') else d.status,
                 "created_at": d.created_at.isoformat(),
                 "updated_at": d.updated_at.isoformat()
             }
@@ -333,6 +530,103 @@ class EnhancedEmailAgent:
             }
         }
     
+    def _parse_email_count(self, user_request: str) -> Optional[int]:
+        """Parse the number of emails requested from natural language"""
+        import re
+        
+        # Look for patterns like "get 5 emails", "latest 3 emails", "show 10 emails"
+        patterns = [
+            r'(\d+)\s+emails?',  # "5 emails"
+            r'(\d+)\s+latest',    # "3 latest"
+            r'latest\s+(\d+)',    # "latest 2"
+            r'get\s+(\d+)',       # "get 1"
+            r'show\s+(\d+)',      # "show 5"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, user_request, re.IGNORECASE)
+            if match:
+                try:
+                    count = int(match.group(1))
+                    return min(count, 100)  # Cap at 100
+                except ValueError:
+                    continue
+        
+        # Check for singular forms that imply 1
+        if any(word in user_request for word in ['latest email', 'recent email', 'new email', 'last email']):
+            return 1
+        
+        return None  # No specific count found, use default
+    
+    def _parse_message_id(self, user_request: str) -> Optional[str]:
+        """Parse message ID from natural language request"""
+        import re
+        
+        # Look for Gmail message ID patterns
+        # Gmail message IDs are typically long alphanumeric strings
+        patterns = [
+            r'id\s+([a-zA-Z0-9]{10,})',  # "id 1234567890abcdef"
+            r'message\s+id\s+([a-zA-Z0-9]{10,})',  # "message id 1234567890abcdef"
+            r'email\s+id\s+([a-zA-Z0-9]{10,})',  # "email id 1234567890abcdef"
+            r'message\s+([a-zA-Z0-9]{10,})',  # "message 1234567890abcdef"
+            r'email\s+([a-zA-Z0-9]{10,})',  # "email 1234567890abcdef"
+            r'([a-zA-Z0-9]{16,})',  # Just a long alphanumeric string (likely message ID)
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, user_request, re.IGNORECASE)
+            if match:
+                message_id = match.group(1)
+                # Basic validation - Gmail message IDs are usually 16+ characters
+                if len(message_id) >= 10:
+                    return message_id
+        
+        return None  # No message ID found
+    
+    def _extract_search_keywords(self, user_request: str) -> List[str]:
+        """Extract meaningful keywords from user request for email search"""
+        import re
+        
+        # Common stop words to filter out
+        stop_words = {
+            'a', 'an', 'the', 'and', 'or', 'but', 'if', 'while', 'at', 'by', 'for', 'with', 
+            'about', 'against', 'between', 'into', 'through', 'during', 'before', 'after',
+            'above', 'below', 'to', 'from', 'up', 'down', 'in', 'out', 'on', 'off', 'over', 
+            'under', 'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where', 
+            'why', 'how', 'all', 'any', 'both', 'each', 'few', 'more', 'most', 'other', 
+            'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so', 'than', 'too', 
+            'very', 'can', 'will', 'just', 'should', 'now', 'get', 'show', 'list', 'find',
+            'search', 'look', 'check', 'see', 'mail', 'email', 'emails', 'message', 'messages',
+            'received', 'sent', 'got', 'have', 'has', 'had', 'do', 'does', 'did', 'is', 'are',
+            'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did',
+            'i', 'me', 'my', 'myself', 'we', 'our', 'ours', 'ourselves', 'you', 'your', 'yours',
+            'yourself', 'yourselves', 'he', 'him', 'his', 'himself', 'she', 'her', 'hers',
+            'herself', 'it', 'its', 'itself', 'they', 'them', 'their', 'theirs', 'themselves'
+        }
+        
+        # Split into words and filter
+        words = re.findall(r'\b\w+\b', user_request.lower())
+        keywords = [word for word in words if len(word) > 2 and word not in stop_words]
+        
+        # Prioritize proper nouns, organizations, and specific terms
+        priority_keywords = []
+        for keyword in keywords:
+            # Capitalized words (likely proper nouns)
+            if keyword[0].isupper():
+                priority_keywords.append(keyword)
+            # Numbers (like account numbers, dates)
+            elif keyword.isdigit() and len(keyword) > 3:
+                priority_keywords.append(keyword)
+            # All caps (likely acronyms like ICICI, HSBC)
+            elif keyword.isupper() and len(keyword) > 2:
+                priority_keywords.append(keyword)
+        
+        # If we have priority keywords, use them; otherwise use all filtered keywords
+        if priority_keywords:
+            return priority_keywords[:3]  # Limit to top 3 to avoid too broad search
+        else:
+            return keywords[:3]  # Limit to 3 keywords max
+    
     async def _handle_read(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Handle email reading/fetching request"""
         
@@ -345,9 +639,18 @@ class EnhancedEmailAgent:
             }
         
         user_request = state.get("user_request", "").lower()
-        max_results = state.get("max_results", 10)
+        max_results = state.get("max_results", 5)
         query = state.get("query")
         message_id = state.get("message_id")
+        
+        # Parse dynamic max_results from user request
+        parsed_max_results = self._parse_email_count(user_request)
+        if parsed_max_results is not None:
+            max_results = min(parsed_max_results, 100)  # Cap at 100
+        
+        # Parse message_id from user request if not provided
+        if not message_id:
+            message_id = self._parse_message_id(user_request)
         
         try:
             # If specific message ID requested
@@ -372,20 +675,51 @@ class EnhancedEmailAgent:
             # List emails based on request
             # Parse query from natural language
             if not query:
+                query_parts = []
+                
+                # Handle status filters
                 if "unread" in user_request:
-                    query = "is:unread"
+                    query_parts.append("is:unread")
                 elif "important" in user_request:
-                    query = "is:important"
+                    query_parts.append("is:important")
                 elif "starred" in user_request:
-                    query = "is:starred"
-                # Check for sender filter
-                if "from " in user_request:
-                    # Extract email after "from"
-                    import re
-                    match = re.search(r'from\s+([^\s]+@[^\s]+)', user_request)
+                    query_parts.append("is:starred")
+                
+                # Handle time-based filters
+                if any(word in user_request for word in ["recent", "latest", "new", "today"]):
+                    # For recent emails, we could add date filters, but Gmail search is limited
+                    # Just rely on the natural ordering from Gmail API
+                    pass
+                
+                # Check for sender filter - more flexible parsing
+                import re
+                sender_patterns = [
+                    r'from\s+([^\s]+@[^\s]+)',  # "from email@domain.com"
+                    r'from\s+([^\s]+)',         # "from John" or "from ICICI"
+                ]
+                for pattern in sender_patterns:
+                    match = re.search(pattern, user_request, re.IGNORECASE)
                     if match:
                         sender = match.group(1)
-                        query = f"from:{sender}" if not query else f"{query} from:{sender}"
+                        # If it looks like an email address, use from: filter
+                        if '@' in sender:
+                            query_parts.append(f"from:{sender}")
+                        else:
+                            # For names/organizations, search in from field
+                            query_parts.append(f"from:{sender}")
+                        break
+                
+                # Extract keywords for subject/body search
+                # Remove common words and extract potential search terms
+                keywords = self._extract_search_keywords(user_request)
+                if keywords:
+                    # Add keywords to search in subject and body
+                    keyword_query = " OR ".join(keywords)
+                    query_parts.append(f"subject:({keyword_query}) OR {keyword_query}")
+                
+                # Combine all query parts
+                if query_parts:
+                    query = " ".join(query_parts)
             
             # Fetch emails
             result = await self.connector.list_emails(

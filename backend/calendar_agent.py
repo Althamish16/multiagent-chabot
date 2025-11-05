@@ -53,7 +53,7 @@ class EnhancedCalendarAgent:
            - If user specifies timezone (IST, PST, EST, etc.), include it as offset in ISO format
            - IST (Indian Standard Time) = UTC+05:30 → use format: YYYY-MM-DDTHH:MM:SS+05:30
            - PST (Pacific) = UTC-08:00 → use format: YYYY-MM-DDTHH:MM:SS-08:00
-           - If NO timezone mentioned, use format without offset: YYYY-MM-DDTHH:MM:SS (Google will use user's default)
+           - If NO timezone mentioned, use format with UTC: YYYY-MM-DDTHH:MM:SSZ
         4. If only date mentioned, assume reasonable business hours (9 AM - 6 PM)
         5. Default duration is 30 minutes if not specified
         6. For attendees, extract email addresses if mentioned
@@ -63,7 +63,7 @@ class EnhancedCalendarAgent:
 
         EXAMPLES:
         - "meeting at 11 AM IST on Oct 28" → "2025-10-28T11:00:00+05:30"
-        - "call at 3 PM tomorrow" → "2025-10-25T15:00:00" (no timezone)
+        - "call at 3 PM tomorrow" → "2025-10-25T15:00:00Z"
         - "appointment at 2 PM PST" → "2025-10-24T14:00:00-08:00"
         - "update standup meeting to 12 PM" → action: "update", event_query: "standup meeting"
         - "delete client call" → action: "delete", event_query: "client call"

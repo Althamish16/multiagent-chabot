@@ -10,7 +10,7 @@ from datetime import datetime
 
 from calendar_agent import EnhancedCalendarAgent
 from notes_agent import EnhancedNotesAgent
-from file_summarizer_agent import EnhancedFileSummarizerAgent
+from advanced_file_summarizer_agent import AdvancedFileSummarizerAgent
 from email_agent import EnhancedEmailAgent
 from config import (
     AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
@@ -24,7 +24,8 @@ class OrchestratorState(TypedDict):
     user_request: str
     session_id: str
     access_token: Optional[str]
-    file_content: Optional[str]
+    file_content: Optional[bytes]
+    file_name: Optional[str]
     conversation_history: List[Dict[str, Any]]
     analysis_result: Dict[str, Any]
     agent_results: Dict[str, Any]
@@ -45,7 +46,7 @@ class DynamicMultiAgentOrchestrator:
         )
         self.calendar_agent = EnhancedCalendarAgent()
         self.notes_agent = EnhancedNotesAgent()
-        self.file_agent = EnhancedFileSummarizerAgent()
+        self.file_agent = AdvancedFileSummarizerAgent()
         self.email_agent = EnhancedEmailAgent()
 
         # Build the LangGraph
@@ -100,9 +101,33 @@ class DynamicMultiAgentOrchestrator:
             logging.warning(f"Failed to load conversation history: {e}")
             state["conversation_history"] = []
 
+        # Load available files information
+        file_context = ""
+        try:
+            from database_utils import get_session_files_dir
+            
+            # Check current session only
+            files_dir = get_session_files_dir(state['session_id'])
+            file_paths = []
+            if files_dir.exists():
+                file_paths.extend(list(files_dir.glob("*")))
+            
+            if file_paths:
+                file_info = []
+                for file_path in file_paths:
+                    file_size = file_path.stat().st_size
+                    file_info.append(f"- {file_path.name} ({file_size} bytes)")
+                
+                file_context = f"Available files in current session:\n" + "\n".join(file_info)
+            else:
+                file_context = "No files available in current session."
+        except Exception as e:
+            logging.warning(f"Failed to load file context: {e}")
+            file_context = "File context unavailable."
+
         analysis_prompt = ChatPromptTemplate.from_template("""
         You are the Orchestrator for a multi-agent system. Decide which agents to run and in what order based on
-        the current user request and recent conversation.
+        the current user request, recent conversation, and available files.
 
         Current date: {current_date}
 
@@ -110,7 +135,7 @@ class DynamicMultiAgentOrchestrator:
         - calendar_agent — schedule/reschedule/cancel meetings, find availability, list events
         - notes_agent — create/update/search notes, action items, meeting minutes
         - file_agent — read/summarize/extract/analyze documents and files
-        - email_agent — read inbox/unread/search, draft/send/reply/forward emails
+        - email_agent — read inbox/unread/search, draft/approve/send/reply/forward emails
 
         Guidance:
         - Select the minimal set of agents required to satisfy the request.
@@ -118,6 +143,8 @@ class DynamicMultiAgentOrchestrator:
             email_agent → calendar_agent to schedule from an email; file_agent → notes_agent to capture a summary).
         - If nothing actionable is required, return an empty list for agents_to_invoke.
         - Prefer single-agent workflows when possible.
+        - Consider available files when deciding whether to invoke file_agent.
+        - For email actions: use "approve" when user wants to approve a draft, "send" when user wants to send an already approved email.
 
         Output format (STRICT JSON only; no prose, no markdown, no code fences):
                 {{
@@ -125,7 +152,7 @@ class DynamicMultiAgentOrchestrator:
                     "reasoning": "one or two sentences explaining the choice",
                     "workflow_type": "short label like 'email_search' | 'file_summary' | 'schedule_meeting' | 'notes_capture' | 'multi_step' | 'no_action'",
                     "agent_actions": {{
-                        "email_agent": {{"action": "read_inbox|list_unread|search|draft|send|reply", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
+                        "email_agent": {{"action": "read|draft|approve|send|list|update", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
                         "calendar_agent": {{"action": "create_event|list_events|find_time|reschedule|cancel", "parameters": {{"date": "", "time": "", "duration_min": 0, "attendees": []}}}},
                         "file_agent": {{"action": "summarize|extract|analyze", "parameters": {{"file_hint": "", "sections": []}}}},
                         "notes_agent": {{"action": "create|append|search|list", "parameters": {{"title": "", "content": ""}}}}
@@ -137,6 +164,8 @@ class DynamicMultiAgentOrchestrator:
         - agents_to_invoke must only contain these exact values: ["calendar_agent", "notes_agent", "file_agent", "email_agent"].
         - Do not include agents that are not clearly relevant.
         - Do not include chain-of-thought. Return ONLY the JSON object.
+
+        {file_context}
 
         Conversation (last messages):
         {conversation_history}
@@ -151,6 +180,7 @@ class DynamicMultiAgentOrchestrator:
         result = await chain.ainvoke({
             "user_request": state["user_request"],
             "conversation_history": conversation_text,
+            "file_context": file_context,
             "current_date": current_date
         })
 
@@ -158,35 +188,40 @@ class DynamicMultiAgentOrchestrator:
         state["agents_to_invoke"] = result.get("agents_to_invoke", [])
         
         # Fallbacks: If user mentions agent-related keywords and agent not included, add it
-        user_request_lower = state["user_request"].lower()
-        keyword_map = {
-            "email_agent": [
-                "email", "mail", "inbox", "message", "unread", "gmail", "latest email", "recent email",
-                "send email", "draft email", "compose"
-            ],
-            "calendar_agent": [
-                "calendar", "meeting", "schedule", "reschedule", "appointment", "event", "availability",
-                "time slot", "book", "invite"
-            ],
-            "file_agent": [
-                "file", "document", "pdf", "docx", "ppt", "slide", "slides", "summarize", "extract",
-                "analyze", "report"
-            ],
-            "notes_agent": [
-                "note", "notes", "notebook", "remember", "save this", "to-do", "todo", "task list",
-                "minutes"
-            ]
-        }
+        # But don't override if LLM determined no action is needed
+        workflow_type = result.get("workflow_type", "")
+        if workflow_type == "no_action":
+            logging.info("LLM determined no action needed, skipping keyword fallbacks")
+        else:
+            user_request_lower = state["user_request"].lower()
+            keyword_map = {
+                "email_agent": [
+                    "email", "mail", "inbox", "message", "unread", "gmail", "latest email", "recent email",
+                    "send email", "draft email", "compose"
+                ],
+                "calendar_agent": [
+                    "calendar", "meeting", "schedule", "reschedule", "appointment", "event", "availability",
+                    "time slot", "book", "invite"
+                ],
+                "file_agent": [
+                    "file", "document", "pdf", "docx", "ppt", "slide", "slides", "summarize", "extract",
+                    "analyze", "report"
+                ],
+                "notes_agent": [
+                    "note", "notes", "notebook", "remember", "save this", "to-do", "todo", "task list",
+                    "minutes"
+                ]
+            }
 
-        detected_agents = []
-        for agent_name, keywords in keyword_map.items():
-            if any(keyword in user_request_lower for keyword in keywords):
-                detected_agents.append(agent_name)
+            detected_agents = []
+            for agent_name, keywords in keyword_map.items():
+                if any(keyword in user_request_lower for keyword in keywords):
+                    detected_agents.append(agent_name)
 
-        for agent_name in detected_agents:
-            if agent_name not in state["agents_to_invoke"]:
-                state["agents_to_invoke"].append(agent_name)
-                logging.info(f"Fallback triggered: Added {agent_name} due to keywords in request")
+            for agent_name in detected_agents:
+                if agent_name not in state["agents_to_invoke"]:
+                    state["agents_to_invoke"].append(agent_name)
+                    logging.info(f"Fallback triggered: Added {agent_name} due to keywords in request")
         
         logging.info(f"Analysis complete: {result}")
         logging.info(f"Final agents to invoke: {state['agents_to_invoke']}")
@@ -256,6 +291,7 @@ class DynamicMultiAgentOrchestrator:
         logging.info("Executing notes agent")
         agent_state = {
             "user_request": state["user_request"],
+            "access_token": state.get("access_token"),
             "context": state.get("agent_results", {}),
             "conversation_history": state.get("conversation_history", []),
             "results": {}
@@ -269,16 +305,64 @@ class DynamicMultiAgentOrchestrator:
     async def _execute_file_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the file agent"""
         logging.info("Executing file agent")
-        agent_state = {
-            "user_request": state["user_request"],
-            "context": state.get("agent_results", {}),
-            "conversation_history": state.get("conversation_history", []),
-            "results": {}
-        }
-
-        result = await self.file_agent.process_request(agent_state, state.get("file_content"))
+        
+        file_content = state.get("file_content")
+        if not file_content:
+            result = {
+                "status": "error",
+                "message": "📄 No file content provided for analysis",
+                "collaboration_data": {}
+            }
+        else:
+            # Convert string to bytes if needed
+            if isinstance(file_content, str):
+                file_content_bytes = file_content.encode('utf-8')
+            else:
+                file_content_bytes = file_content
+            
+            # Extract file name from state or use default
+            file_name = state.get("file_name", "uploaded_file.txt")
+            
+            # Determine summary mode from user request or default
+            user_request = state["user_request"]
+            summary_mode = "detailed"  # default
+            if "brief" in user_request.lower():
+                summary_mode = "brief"
+            elif "executive" in user_request.lower():
+                summary_mode = "executive"
+            
+            # Call the advanced file summarizer
+            result = await self.file_agent.process_file(
+                file_content=file_content_bytes,
+                file_name=file_name,
+                user_request=user_request,
+                summary_mode=summary_mode,
+                query=None,  # Could be extracted from user_request if it's a query
+                conversation_history=state.get("conversation_history", [])
+            )
+            
+            # Adapt the response format to match what the orchestrator expects
+            if result["status"] == "success":
+                adapted_result = {
+                    "status": "success",
+                    "result": {
+                        "summary": result.get("summary", ""),
+                        "key_insights": result.get("key_insights", []),
+                        "metadata": result.get("metadata", {}),
+                        "file_type": result.get("file_type", ""),
+                        "query_response": result.get("query_response")
+                    },
+                    "message": f"📄 **Advanced Document Analysis Complete**\n\n**Summary:** {result.get('summary', '')[:200]}...\n\n**Key Insights:** {len(result.get('key_insights', []))} insights extracted",
+                    "collaboration_data": {
+                        "analysis": result,
+                        "recommended_workflows": {},  # Could be enhanced later
+                        "next_actions": result.get("key_insights", [])
+                    }
+                }
+                result = adapted_result
+            # If error, the format is already compatible
+        
         state["agent_results"]["file_agent"] = result
-
         return state
 
     async def _execute_email_agent(self, state: OrchestratorState) -> OrchestratorState:
@@ -290,6 +374,11 @@ class DynamicMultiAgentOrchestrator:
             "access_token": state.get("access_token"),
             "conversation_history": state.get("conversation_history", []),
             "context": state.get("agent_results", {}),
+            "action": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("action"),
+            "recipient": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("recipient"),
+            "subject": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("subject"),
+            "tone": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("tone"),
+            "query": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("query"),
         }
 
         result = await self.email_agent.process_request(agent_state)
@@ -304,11 +393,89 @@ class DynamicMultiAgentOrchestrator:
         agent_results = state.get("agent_results", {})
         analysis = state.get("analysis_result", {})
 
-        # Special handling for email agent results
+        # Check if multiple agents were involved
+        agents_used = list(agent_results.keys())
+        
+        # If multiple agents, compile all their results
+        if len(agents_used) > 1:
+            response_parts = []
+            
+            # Notes agent result
+            if "notes_agent" in agent_results:
+                notes_result = agent_results["notes_agent"]
+                if notes_result.get("status") == "success":
+                    response_parts.append(notes_result.get("message", "Notes saved successfully"))
+            
+            # Email agent result
+            if "email_agent" in agent_results:
+                email_result = agent_results["email_agent"]
+                if email_result.get("status") == "success":
+                    result_data = email_result.get("result", {})
+                    if "draft_id" in result_data:
+                        body_preview = result_data.get("body", "")[:300]
+                        response_parts.append(
+                            f"\n📧 **Email Draft Created**\n"
+                            f"**To:** {result_data.get('to', 'N/A')}\n"
+                            f"**Subject:** {result_data.get('subject', 'N/A')}\n"
+                            f"**Preview:** {body_preview}..."
+                        )
+                    else:
+                        response_parts.append(email_result.get("message", "Email processed"))
+            
+            # Calendar agent result
+            if "calendar_agent" in agent_results:
+                calendar_result = agent_results["calendar_agent"]
+                if calendar_result.get("status") == "success":
+                    response_parts.append(calendar_result.get("message", "Calendar updated"))
+            
+            # File agent result
+            if "file_agent" in agent_results:
+                file_result = agent_results["file_agent"]
+                if file_result.get("status") == "success":
+                    response_parts.append(file_result.get("message", "File processed"))
+            
+            if response_parts:
+                state["final_response"] = "\n\n".join(response_parts)
+                return state
+
+        # Special handling for email agent results (single agent)
         if "email_agent" in agent_results:
             email_result = agent_results["email_agent"]
             if email_result.get("status") == "success":
                 result_data = email_result.get("result", {})
+                
+                # Check if this is a draft creation
+                if "draft_id" in result_data:
+                    # Draft was created - store draft info in state for frontend
+                    state["draft_created"] = {
+                        "draft_id": result_data.get("draft_id"),
+                        "to": result_data.get("to"),
+                        "subject": result_data.get("subject"),
+                        "body": result_data.get("body"),
+                        "status": result_data.get("status"),
+                        "created_at": result_data.get("created_at")
+                    }
+                    
+                    # Create detailed response showing the actual draft content
+                    body_preview = result_data.get("body", "")[:500]
+                    draft_response = [
+                        "📧 **Email Draft Created**",
+                        f"**To:** {result_data.get('to', 'N/A')}",
+                        f"**Subject:** {result_data.get('subject', 'N/A')}",
+                        f"**Status:** {result_data.get('status', 'pending_approval')}",
+                        "\n**Email Content:**",
+                        body_preview
+                    ]
+                    
+                    if len(result_data.get("body", "")) > 500:
+                        draft_response.append("\n... (content truncated)")
+                    
+                    draft_response.append("\n✅ The draft is awaiting your approval.")
+                    
+                    state["final_response"] = "\n".join(draft_response)
+                    return state
+                
+                # Email reading/listing
                 email_summaries = result_data.get("email_summaries", [])
                 total_count = result_data.get("total_count", 0)
                 query = result_data.get("query", "")
@@ -357,12 +524,18 @@ class DynamicMultiAgentOrchestrator:
         Agent results: {agent_results}
 
         Create a response that:
-        1. Summarizes what was accomplished
-        2. Provides clear information about each agent's contribution
-        3. Offers next steps or follow-up actions if relevant
-        4. Maintains a professional, helpful tone
+        1. Summarizes what was accomplished with SPECIFIC DETAILS from each agent
+        2. Shows the ACTUAL CONTENT that was created (document titles, URLs, key information)
+        3. If a document was created, include the document title and URL
+        4. If notes were saved, show what was saved
+        5. Provides clear information about each agent's contribution with REAL DATA
+        6. Offers next steps or follow-up actions if relevant
+        7. Maintains a professional, helpful tone
 
-        Keep the response concise but comprehensive.
+        IMPORTANT: Include actual content, not just generic descriptions like "2 agents" or "content saved".
+        Show what was actually created or retrieved.
+
+        Keep the response detailed but well-organized.
         """)
 
         chain = compile_prompt | self.llm
@@ -375,7 +548,7 @@ class DynamicMultiAgentOrchestrator:
         state["final_response"] = response.content
         return state
 
-    async def process_request(self, user_request: str, session_id: str, access_token: str = None, file_content: str = None) -> Dict[str, Any]:
+    async def process_request(self, user_request: str, session_id: str, access_token: str = None, file_content: bytes = None, file_name: str = None) -> Dict[str, Any]:
         """Process user request through the dynamic LangGraph orchestrator"""
         logging.info(f"Processing request: '{user_request}' for session {session_id}")
 
@@ -386,6 +559,7 @@ class DynamicMultiAgentOrchestrator:
                 "session_id": session_id,
                 "access_token": access_token,
                 "file_content": file_content,
+                "file_name": file_name,
                 "conversation_history": [],
                 "analysis_result": {},
                 "agent_results": {},
@@ -402,8 +576,9 @@ class DynamicMultiAgentOrchestrator:
             # Extract results
             agent_results = final_state.get("agent_results", {})
             analysis = final_state.get("analysis_result", {})
+            draft_created = final_state.get("draft_created")
 
-            return {
+            result = {
                 "response": final_state.get("final_response", "Request processed successfully"),
                 "agent_used": "dynamic_langgraph_orchestrator",
                 "workflow_type": analysis.get("workflow_type", "dynamic"),
@@ -413,6 +588,12 @@ class DynamicMultiAgentOrchestrator:
                     "agent_results": agent_results
                 }
             }
+            
+            # Add draft info if email draft was created
+            if draft_created:
+                result["draft_created"] = draft_created
+            
+            return result
 
         except Exception as e:
             logging.error(f"Dynamic orchestrator error: {str(e)}")

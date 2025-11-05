@@ -6,6 +6,7 @@ import { LogIn, LogOut, User } from 'lucide-react';
 export const LoginButton = () => {
     const { user, isAuthenticated, loading, login, logout, error } = useAuth();
     const [isLoggingIn, setIsLoggingIn] = useState(false);
+    const [profileImageError, setProfileImageError] = useState(false);
 
     const handleLogin = async () => {
         setIsLoggingIn(true);
@@ -21,6 +22,14 @@ export const LoginButton = () => {
 
     const handleLogout = () => {
         logout();
+        setProfileImageError(false); // Reset error state on logout
+    };
+
+    const handleImageError = async () => {
+        setProfileImageError(true);
+        
+        // Note: Removed refreshProfile call as it won't fix broken image URLs
+        // The profile refresh is for updating user data, not fixing image loading issues
     };
 
     if (loading) {
@@ -36,11 +45,12 @@ export const LoginButton = () => {
         return (
             <div className="flex items-center gap-3">
                 <div className="flex items-center gap-2">
-                    {user.picture ? (
+                    {user.picture && !profileImageError ? (
                         <img 
                             src={user.picture} 
                             alt={user.name}
                             className="w-8 h-8 rounded-full"
+                            onError={handleImageError}
                         />
                     ) : (
                         <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center">
