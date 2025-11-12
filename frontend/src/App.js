@@ -3,7 +3,6 @@ import axios from 'axios';
 import { useAuth } from './components/AuthProvider_new';
 import { EmailDraftModal } from './components/EmailDraftModal';
 import { DraftListModal } from './components/DraftListModal';
-import { DraftIcon } from './components/DraftIcon';
 import './App.css';
 
 const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:5000/api';
@@ -577,23 +576,25 @@ function App() {
               />
               
               <button 
+                onClick={handleOpenDraftList} 
+                className="btn-send"
+                disabled={!isAuthenticated}
+                title="Open email drafts"
+              >
+                📧
+              </button>
+              
+              <button 
                 onClick={sendMessage} 
                 className="btn-send"
                 disabled={isLoading || (!inputMessage.trim() && !attachedFile) || !isAuthenticated}
                 title="Send message"
               >
-                {isLoading ? '⏳' : '➤'}
+                {isLoading ? '⏳' : '💬'}
               </button>
             </div>
           </div>
         </main>
-
-        {/* Email Draft Icon */}
-        <DraftIcon 
-          sessionId={sessionId}
-          onClick={handleOpenDraftList}
-          isAuthenticated={isAuthenticated}
-        />
 
         {/* Email Draft Modal */}
         {showDraftModal && currentDraft && (

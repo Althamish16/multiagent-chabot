@@ -95,6 +95,8 @@ class GoogleDocsConnector:
             # The document owner (authenticated user) should have full access by default
             # No additional permissions needed for basic access
             
+            permission_set = False  # Track if sharing permissions were successfully set
+            
             try:
                 # Get the document details to confirm ownership
                 doc_details = drive_service.files().get(
@@ -105,18 +107,44 @@ class GoogleDocsConnector:
                 logging.info(f"Document created successfully: {doc_details.get('name')} owned by {doc_details.get('owners', [{}])[0].get('emailAddress', 'unknown')}")
                 
                 # Make the document accessible via link for easier access
-                permission = {
-                    'type': 'anyone',
-                    'role': 'reader',
-                    'allowFileDiscovery': False
-                }
-                drive_service.permissions().create(
-                    fileId=doc_id,
-                    body=permission,
-                    sendNotificationEmail=False
-                ).execute()
+                # Sometimes permission setting fails immediately after creation, so add retry logic
+                import time
+                max_retries = 3
                 
-                logging.info("Document shared with anyone who has the link")
+                for attempt in range(max_retries):
+                    try:
+                        permission = {
+                            'type': 'anyone',
+                            'role': 'reader',
+                            'allowFileDiscovery': False
+                        }
+                        drive_service.permissions().create(
+                            fileId=doc_id,
+                            body=permission,
+                            sendNotificationEmail=False
+                        ).execute()
+                        
+                        permission_set = True
+                        logging.info("Document shared with anyone who has the link")
+                        break
+                        
+                    except Exception as perm_error:
+                        logging.warning(f"Permission setting attempt {attempt + 1} failed: {perm_error}")
+                        if attempt < max_retries - 1:
+                            time.sleep(1)  # Wait 1 second before retry
+                        else:
+                            logging.error(f"Failed to set permissions after {max_retries} attempts")
+                
+                # Verify the permission was set correctly
+                if permission_set:
+                    try:
+                        permissions = drive_service.permissions().list(fileId=doc_id).execute()
+                        link_sharing_enabled = any(p.get('type') == 'anyone' and p.get('role') == 'reader' for p in permissions.get('permissions', []))
+                        logging.info(f"Link sharing verification: {'enabled' if link_sharing_enabled else 'failed'}")
+                    except Exception as verify_error:
+                        logging.warning(f"Could not verify permissions: {verify_error}")
+                else:
+                    logging.warning("Permission setting failed - document may only be accessible to owner")
                 
             except Exception as perm_error:
                 logging.warning(f"Could not set sharing permissions: {perm_error}")
@@ -128,15 +156,22 @@ class GoogleDocsConnector:
                 fields='id, name, webViewLink, modifiedTime, createdTime, owners(displayName,emailAddress), shared, permissions'
             ).execute()
 
+            # Generate a fallback URL if webViewLink is not available
+            web_view_link = doc_details.get('webViewLink', '')
+            if not web_view_link:
+                web_view_link = f"https://docs.google.com/document/d/{doc_id}/edit"
+                logging.warning(f"webViewLink not available, using fallback URL: {web_view_link}")
+
             return {
                 'id': doc_details['id'],
                 'title': doc_details['name'],
-                'url': doc_details.get('webViewLink', ''),  # Use webViewLink which is valid
+                'url': web_view_link,
                 'created_time': doc_details['createdTime'],
                 'modified_time': doc_details['modifiedTime'],
                 'owner': doc_details.get('owners', [{}])[0].get('displayName', ''),
                 'owner_email': doc_details.get('owners', [{}])[0].get('emailAddress', ''),
                 'shared': doc_details.get('shared', False),
+                'sharing_enabled': permission_set if 'permission_set' in locals() else False,
                 'status': 'created'
             }
 
@@ -172,9 +207,16 @@ class GoogleDocsConnector:
 
             # Get document content from Docs
             doc_content = docs_service.documents().get(documentId=document_id).execute()
+            
+            # Debug logging
+            logging.debug(f"Document content keys: {list(doc_content.keys()) if doc_content else 'None'}")
+            if 'body' in doc_content and 'content' in doc_content['body']:
+                logging.debug(f"Body content length: {len(doc_content['body']['content'])}")
 
             # Extract plain text content
             content_text = self._extract_text_from_doc(doc_content)
+            
+            logging.info(f"Successfully extracted content from document '{doc_metadata['name']}' - length: {len(content_text)} characters")
 
             return {
                 'id': doc_metadata['id'],
@@ -204,15 +246,51 @@ class GoogleDocsConnector:
     def _extract_text_from_doc(self, doc_content: Dict[str, Any]) -> str:
         """Extract plain text from Google Doc content"""
         text_content = []
-
-        if 'body' in doc_content and 'content' in doc_content['body']:
-            for element in doc_content['body']['content']:
-                if 'paragraph' in element:
-                    for paragraph_element in element['paragraph']['elements']:
-                        if 'textRun' in paragraph_element:
-                            text_content.append(paragraph_element['textRun']['content'])
-
-        return ''.join(text_content)
+        
+        try:
+            if 'body' in doc_content and 'content' in doc_content['body']:
+                for element in doc_content['body']['content']:
+                    if 'paragraph' in element:
+                        paragraph_text = []
+                        for paragraph_element in element['paragraph']['elements']:
+                            if 'textRun' in paragraph_element and 'content' in paragraph_element['textRun']:
+                                paragraph_text.append(paragraph_element['textRun']['content'])
+                        if paragraph_text:
+                            text_content.append(''.join(paragraph_text))
+                        else:
+                            text_content.append('\n')  # Empty paragraph
+                    elif 'table' in element:
+                        # Handle tables
+                        text_content.append('\n[Table]\n')
+                        for row in element['table']['tableRows']:
+                            row_text = []
+                            for cell in row['tableCells']:
+                                cell_content = []
+                                for cell_element in cell['content']:
+                                    if 'paragraph' in cell_element:
+                                        for paragraph_element in cell_element['paragraph']['elements']:
+                                            if 'textRun' in paragraph_element and 'content' in paragraph_element['textRun']:
+                                                cell_content.append(paragraph_element['textRun']['content'])
+                                row_text.append(''.join(cell_content))
+                            text_content.append('\t'.join(row_text))
+                            text_content.append('\n')
+                        text_content.append('\n')
+                    elif 'sectionBreak' in element:
+                        text_content.append('\n')
+                        
+            extracted_text = ''.join(text_content).strip()
+            logging.debug(f"Extracted {len(extracted_text)} characters from document")
+            
+            # If no content was extracted, provide a helpful message
+            if not extracted_text:
+                return "[Document appears to be empty or contains only non-text elements]"
+                
+            return extracted_text
+            
+        except Exception as e:
+            logging.error(f"Error extracting text from document: {e}")
+            logging.error(f"Document content structure: {doc_content.keys() if doc_content else 'None'}")
+            return "[Error extracting content]"
 
     async def update_document(
         self,

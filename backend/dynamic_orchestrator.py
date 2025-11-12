@@ -7,11 +7,13 @@ from langchain_openai import AzureChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from datetime import datetime
+import asyncio
 
 from calendar_agent import EnhancedCalendarAgent
 from notes_agent import EnhancedNotesAgent
 from advanced_file_summarizer_agent import AdvancedFileSummarizerAgent
 from email_agent import EnhancedEmailAgent
+from general_agent import GeneralTaskAgent
 from config import (
     AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_CHAT_DEPLOYMENT_NAME
 )
@@ -48,6 +50,7 @@ class DynamicMultiAgentOrchestrator:
         self.notes_agent = EnhancedNotesAgent()
         self.file_agent = AdvancedFileSummarizerAgent()
         self.email_agent = EnhancedEmailAgent()
+        self.general_agent = GeneralTaskAgent()
 
         # Build the LangGraph
         self.graph = self._build_graph()
@@ -136,6 +139,7 @@ class DynamicMultiAgentOrchestrator:
         - notes_agent — create/update/search notes, action items, meeting minutes
         - file_agent — read/summarize/extract/analyze documents and files
         - email_agent — read inbox/unread/search, draft/approve/send/reply/forward emails
+        - general_agent — handle general tasks, answer questions, create plans and strategies
 
         Guidance:
         - Select the minimal set of agents required to satisfy the request.
@@ -155,13 +159,14 @@ class DynamicMultiAgentOrchestrator:
                         "email_agent": {{"action": "read|draft|approve|send|list|update", "parameters": {{"query": "", "recipient": "", "subject": "", "tone": ""}}}},
                         "calendar_agent": {{"action": "create_event|list_events|find_time|reschedule|cancel", "parameters": {{"date": "", "time": "", "duration_min": 0, "attendees": []}}}},
                         "file_agent": {{"action": "summarize|extract|analyze", "parameters": {{"file_hint": "", "sections": []}}}},
-                        "notes_agent": {{"action": "create|append|search|list", "parameters": {{"title": "", "content": ""}}}}
+                        "notes_agent": {{"action": "create|append|search|list", "parameters": {{"title": "", "content": ""}}}},
+                        "general_agent": {{"action": "task_management|question_answer|planning|general_assistance", "parameters": {{"category": "", "priority": "", "timeline": ""}}}}
                     }},
                     "confidence": 0.0
                 }}
 
         Constraints:
-        - agents_to_invoke must only contain these exact values: ["calendar_agent", "notes_agent", "file_agent", "email_agent"].
+        - agents_to_invoke must only contain these exact values: ["calendar_agent", "notes_agent", "file_agent", "email_agent", "general_agent"].
         - Do not include agents that are not clearly relevant.
         - Do not include chain-of-thought. Return ONLY the JSON object.
 
@@ -210,6 +215,10 @@ class DynamicMultiAgentOrchestrator:
                 "notes_agent": [
                     "note", "notes", "notebook", "remember", "save this", "to-do", "todo", "task list",
                     "minutes"
+                ],
+                "general_agent": [
+                    "task", "todo", "to-do", "reminder", "question", "answer", "explain", "help me",
+                    "plan", "planning", "strategy", "goal", "how to", "what is", "why", "when", "where"
                 ]
             }
 
@@ -247,6 +256,8 @@ class DynamicMultiAgentOrchestrator:
             return await self._execute_file_agent(state)
         elif agent == "email_agent":
             return await self._execute_email_agent(state)
+        elif agent == "general_agent":
+            return await self._execute_general_agent(state)
         else:
             # Unknown agent, skip
             return state
@@ -272,19 +283,40 @@ class DynamicMultiAgentOrchestrator:
     async def _execute_calendar_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the calendar agent"""
         logging.info("Executing calendar agent")
-        agent_state = {
-            "user_request": state["user_request"],
-            "access_token": state.get("access_token"),
-            "context": state.get("agent_results", {}),
-            "conversation_history": state.get("conversation_history", []),
-            "calendar_parameters": state.get("analysis_result", {}).get("agent_actions", {}).get("calendar_agent", {}),
-            "results": {}
-        }
+        try:
+            agent_state = {
+                "user_request": state["user_request"],
+                "access_token": state.get("access_token"),
+                "context": state.get("agent_results", {}),
+                "conversation_history": state.get("conversation_history", []),
+                "calendar_parameters": state.get("analysis_result", {}).get("agent_actions", {}).get("calendar_agent", {}),
+                "results": {}
+            }
 
-        result = await self.calendar_agent.process_request(agent_state)
-        state["agent_results"]["calendar_agent"] = result
-
-        return state
+            result = await asyncio.wait_for(
+                self.calendar_agent.process_request(agent_state),
+                timeout=60.0
+            )
+            state["agent_results"]["calendar_agent"] = result
+            return state
+        except asyncio.TimeoutError:
+            logging.error("Calendar agent timed out")
+            state["agent_results"]["calendar_agent"] = {
+                "status": "error",
+                "message": "❌ Calendar agent timed out",
+                "result": {},
+                "collaboration_data": {"error": "timeout"}
+            }
+            return state
+        except Exception as e:
+            logging.error(f"Calendar agent error: {str(e)}")
+            state["agent_results"]["calendar_agent"] = {
+                "status": "error",
+                "message": f"❌ Calendar agent failed: {str(e)}",
+                "result": {},
+                "collaboration_data": {"error": str(e)}
+            }
+            return state
 
     async def _execute_notes_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the notes agent"""
@@ -368,23 +400,88 @@ class DynamicMultiAgentOrchestrator:
     async def _execute_email_agent(self, state: OrchestratorState) -> OrchestratorState:
         """Execute the email agent"""
         logging.info("Executing email agent")
-        agent_state = {
-            "user_request": state["user_request"],
-            "session_id": state["session_id"],
-            "access_token": state.get("access_token"),
-            "conversation_history": state.get("conversation_history", []),
-            "context": state.get("agent_results", {}),
-            "action": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("action"),
-            "recipient": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("recipient"),
-            "subject": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("subject"),
-            "tone": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("tone"),
-            "query": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("query"),
-        }
+        try:
+            agent_state = {
+                "user_request": state["user_request"],
+                "session_id": state["session_id"],
+                "access_token": state.get("access_token"),
+                "conversation_history": state.get("conversation_history", []),
+                "context": state.get("agent_results", {}),
+                "action": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("action"),
+                "recipient": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("recipient"),
+                "subject": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("subject"),
+                "tone": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("tone"),
+                "query": state.get("analysis_result", {}).get("agent_actions", {}).get("email_agent", {}).get("parameters", {}).get("query"),
+            }
 
-        result = await self.email_agent.process_request(agent_state)
-        state["agent_results"]["email_agent"] = result
+            result = await asyncio.wait_for(
+                self.email_agent.process_request(agent_state),
+                timeout=60.0
+            )
+            state["agent_results"]["email_agent"] = result
+            return state
+        except asyncio.TimeoutError:
+            logging.error("Email agent timed out")
+            state["agent_results"]["email_agent"] = {
+                "status": "error",
+                "message": "❌ Email agent timed out",
+                "result": {},
+                "collaboration_data": {"error": "timeout"}
+            }
+            return state
+        except Exception as e:
+            logging.error(f"Email agent error: {str(e)}")
+            state["agent_results"]["email_agent"] = {
+                "status": "error",
+                "message": f"❌ Email agent failed: {str(e)}",
+                "result": {},
+                "collaboration_data": {"error": str(e)}
+            }
+            return state
 
-        return state
+    async def _execute_general_agent(self, state: OrchestratorState) -> OrchestratorState:
+        """Execute the general agent"""
+        logging.info("Executing general agent")
+        try:
+            agent_state = {
+                "user_request": state["user_request"],
+                "access_token": state.get("access_token"),
+                "context": state.get("agent_results", {}),
+                "conversation_history": state.get("conversation_history", []),
+                "results": {}
+            }
+
+            logging.info(f"Calling general agent with state: {agent_state.keys()}")
+            
+            # Add timeout wrapper
+            result = await asyncio.wait_for(
+                self.general_agent.process_request(agent_state),
+                timeout=90.0  # 90 seconds timeout
+            )
+            
+            logging.info(f"General agent result received: {result.get('status')}")
+            
+            state["agent_results"]["general_agent"] = result
+            return state
+        except asyncio.TimeoutError:
+            logging.error("General agent execution timed out after 90 seconds")
+            state["agent_results"]["general_agent"] = {
+                "status": "error",
+                "message": "❌ General agent timed out - please try a simpler request",
+                "result": {},
+                "collaboration_data": {"error": "timeout"}
+            }
+            return state
+        except Exception as e:
+            logging.error(f"General agent execution error: {str(e)}")
+            # Fallback result
+            state["agent_results"]["general_agent"] = {
+                "status": "error",
+                "message": f"❌ General agent failed: {str(e)}",
+                "result": {},
+                "collaboration_data": {"error": str(e)}
+            }
+            return state
 
     async def _compile_response(self, state: OrchestratorState) -> OrchestratorState:
         """Compile the final response from all agent results"""
@@ -434,85 +531,24 @@ class DynamicMultiAgentOrchestrator:
                 if file_result.get("status") == "success":
                     response_parts.append(file_result.get("message", "File processed"))
             
+            # General agent result
+            if "general_agent" in agent_results:
+                general_result = agent_results["general_agent"]
+                if general_result.get("status") == "success":
+                    response_parts.append(general_result.get("message", "General assistance provided"))
+            
             if response_parts:
                 state["final_response"] = "\n\n".join(response_parts)
                 return state
 
-        # Special handling for email agent results (single agent)
-        if "email_agent" in agent_results:
-            email_result = agent_results["email_agent"]
-            if email_result.get("status") == "success":
-                result_data = email_result.get("result", {})
-                
-                # Check if this is a draft creation
-                if "draft_id" in result_data:
-                    # Draft was created - store draft info in state for frontend
-                    state["draft_created"] = {
-                        "draft_id": result_data.get("draft_id"),
-                        "to": result_data.get("to"),
-                        "subject": result_data.get("subject"),
-                        "body": result_data.get("body"),
-                        "status": result_data.get("status"),
-                        "created_at": result_data.get("created_at")
-                    }
-                    
-                    # Create detailed response showing the actual draft content
-                    body_preview = result_data.get("body", "")[:500]
-                    draft_response = [
-                        "📧 **Email Draft Created**",
-                        f"**To:** {result_data.get('to', 'N/A')}",
-                        f"**Subject:** {result_data.get('subject', 'N/A')}",
-                        f"**Status:** {result_data.get('status', 'pending_approval')}",
-                        "\n**Email Content:**",
-                        body_preview
-                    ]
-                    
-                    if len(result_data.get("body", "")) > 500:
-                        draft_response.append("\n... (content truncated)")
-                    
-                    draft_response.append("\n✅ The draft is awaiting your approval.")
-                    
-                    state["final_response"] = "\n".join(draft_response)
-                    return state
-                
-                # Email reading/listing
-                email_summaries = result_data.get("email_summaries", [])
-                total_count = result_data.get("total_count", 0)
-                query = result_data.get("query", "")
-
-                if email_summaries:
-                    # Format email data into readable response
-                    response_parts = [f"I found {total_count} email{'s' if total_count != 1 else ''}"]
-                    if query:
-                        response_parts[0] += f" matching '{query}'"
-                    response_parts[0] += ":"
-
-                    for i, email in enumerate(email_summaries[:5], 1):  # Show first 5
-                        from_addr = email.get("from", "Unknown")
-                        subject = email.get("subject", "(No Subject)")
-                        snippet = email.get("snippet", "")[:100]
-                        is_unread = " (unread)" if email.get("is_unread") else ""
-                        response_parts.append(f"{i}. From: {from_addr}")
-                        response_parts.append(f"   Subject: {subject}{is_unread}")
-                        if snippet:
-                            response_parts.append(f"   Preview: {snippet}...")
-                        response_parts.append("")
-
-                    if total_count > 5:
-                        response_parts.append(f"... and {total_count - 5} more emails.")
-
-                    state["final_response"] = "\n".join(response_parts)
-                    return state
-                else:
-                    state["final_response"] = email_result.get("message", "No emails found.")
-                    return state
-            elif email_result.get("status") == "error":
-                error_msg = email_result.get("message", "Failed to retrieve emails")
-                if "Authentication required" in error_msg:
-                    state["final_response"] = "Please sign in with Google to access your emails."
-                else:
-                    state["final_response"] = f"❌ {error_msg}"
-                return state
+        # Special handling for single agent results
+        single_agent_handlers = {
+            "email_agent": self._handle_email_response,
+            "general_agent": self._handle_general_response
+        }
+        
+        if len(agents_used) == 1 and agents_used[0] in single_agent_handlers:
+            return single_agent_handlers[agents_used[0]](state, agent_results)
 
         # Use LLM to compile a coherent response for other cases
         compile_prompt = ChatPromptTemplate.from_template("""
@@ -604,3 +640,128 @@ class DynamicMultiAgentOrchestrator:
                 "agents_involved": [],
                 "collaboration_data": {}
             }
+
+    def _handle_email_response(self, state: OrchestratorState, agent_results: Dict[str, Any]) -> OrchestratorState:
+        """Handle single email agent response"""
+        email_result = agent_results["email_agent"]
+        if email_result.get("status") == "success":
+            result_data = email_result.get("result", {})
+            
+            # Check if this is an email send result (has gmail_message_id)
+            if "gmail_message_id" in result_data and result_data["gmail_message_id"]:
+                # Email was sent successfully - try to get draft details from agent results first
+                sent_response = ["✅ **Email Sent Successfully**"]
+                
+                # Check if the email agent has draft info in its collaboration_data
+                collaboration_data = email_result.get("collaboration_data", {})
+                draft_info = collaboration_data.get("draft_info")
+                
+                if draft_info:
+                    sent_response.extend([
+                        f"**To:** {draft_info.get('to', 'N/A')}",
+                        f"**Subject:** {draft_info.get('subject', 'N/A')}",
+                        f"**Message ID:** {result_data.get('gmail_message_id', 'N/A')}"
+                    ])
+                    
+                    # Add body preview if available
+                    body = draft_info.get('body', '')
+                    if body:
+                        body_preview = body[:200]
+                        sent_response.append(f"\n**Content Preview:** {body_preview}...")
+                else:
+                    # Fallback - basic info from result
+                    sent_response.extend([
+                        f"**Draft ID:** {result_data.get('draft_id', 'N/A')}",
+                        f"**Message ID:** {result_data.get('gmail_message_id', 'N/A')}"
+                    ])
+                
+                state["final_response"] = "\n".join(sent_response)
+                return state
+            
+            # Check if this is a draft creation (only if not sent)
+            elif "draft_id" in result_data:
+                # Draft was created - store draft info in state for frontend
+                state["draft_created"] = {
+                    "draft_id": result_data.get("draft_id"),
+                    "to": result_data.get("to"),
+                    "subject": result_data.get("subject"),
+                    "body": result_data.get("body"),
+                    "status": result_data.get("status"),
+                    "created_at": result_data.get("created_at")
+                }
+                
+                # Create detailed response showing the actual draft content
+                body_preview = result_data.get("body", "")[:500]
+                draft_response = [
+                    "📧 **Email Draft Created**",
+                    f"**To:** {result_data.get('to', 'N/A')}",
+                    f"**Subject:** {result_data.get('subject', 'N/A')}",
+                    f"**Status:** {result_data.get('status', 'pending_approval')}",
+                    "\n**Email Content:**",
+                    body_preview
+                ]
+                
+                if len(result_data.get("body", "")) > 500:
+                    draft_response.append("\n... (content truncated)")
+                
+                draft_response.append("\n✅ The draft is awaiting your approval.")
+                
+                state["final_response"] = "\n".join(draft_response)
+                return state
+            
+            # Email reading/listing
+            elif "email_summaries" in result_data:
+                email_summaries = result_data.get("email_summaries", [])
+                total_count = result_data.get("total_count", 0)
+                query = result_data.get("query", "")
+
+                if email_summaries:
+                    # Format email data into readable response
+                    response_parts = [f"I found {total_count} email{'s' if total_count != 1 else ''}"]
+                    if query:
+                        response_parts[0] += f" matching '{query}'"
+                    response_parts[0] += ":"
+
+                    for i, email in enumerate(email_summaries[:5], 1):  # Show first 5
+                        from_addr = email.get("from", "Unknown")
+                        subject = email.get("subject", "(No Subject)")
+                        snippet = email.get("snippet", "")[:100]
+                        is_unread = " (unread)" if email.get("is_unread") else ""
+                        response_parts.append(f"{i}. From: {from_addr}")
+                        response_parts.append(f"   Subject: {subject}{is_unread}")
+                        if snippet:
+                            response_parts.append(f"   Preview: {snippet}...")
+                        response_parts.append("")
+
+                    if total_count > 5:
+                        response_parts.append(f"... and {total_count - 5} more emails.")
+
+                    state["final_response"] = "\n".join(response_parts)
+                    return state
+                else:
+                    state["final_response"] = email_result.get("message", "No emails found.")
+                    return state
+            
+            # Fallback to the message from the email agent
+            else:
+                state["final_response"] = email_result.get("message", "Email operation completed successfully.")
+                return state
+                
+        elif email_result.get("status") == "error":
+            error_msg = email_result.get("message", "Failed to process email request")
+            if "Authentication required" in error_msg:
+                state["final_response"] = "Please sign in with Google to access your emails."
+            else:
+                state["final_response"] = f"❌ {error_msg}"
+            return state
+
+    def _handle_general_response(self, state: OrchestratorState, agent_results: Dict[str, Any]) -> OrchestratorState:
+        """Handle single general agent response"""
+        general_result = agent_results["general_agent"]
+        
+        if general_result.get("status") == "success":
+            state["final_response"] = general_result.get("message", "General assistance provided")
+        else:
+            state["final_response"] = general_result.get("message", "❌ General assistance failed")
+        
+        return state
