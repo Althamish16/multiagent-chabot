@@ -174,9 +174,20 @@ class EnhancedNotesAgent:
                 f"📝 **Document Created in {service_name}**",
                 f"**Title:** {result['title']}",
                 f"**URL:** {result.get('url', 'N/A')}",
+            ]
+            
+            # Check if document is shared
+            sharing_enabled = result.get('sharing_enabled', False)
+            if sharing_enabled:
+                message_parts.append("**Sharing:** Publicly accessible via link")
+            else:
+                message_parts.append("**Sharing:** Private (owner access only)")
+                message_parts.append("ℹ️ If you can't access the document, try refreshing your Google Drive or check sharing settings.")
+            
+            message_parts.extend([
                 f"\n**Content:**",
                 content_preview
-            ]
+            ])
             
             if len(content) > 500:
                 message_parts.append("\n... (content truncated)")
@@ -243,7 +254,7 @@ class EnhancedNotesAgent:
             
             # Get full content based on service
             if service == "google_docs":
-                content_result = await self.docs_connector.get_document_content(
+                content_result = await self.docs_connector.get_document(
                     access_token=access_token,
                     document_id=doc_id
                 )
@@ -255,16 +266,39 @@ class EnhancedNotesAgent:
                     "collaboration_data": {}
                 }
 
+            content = content_result.get('content', '')
+            content_preview = content[:1000] if len(content) > 1000 else content
+            
+            message_parts = [
+                f"📖 Found document '{doc.get('title', 'Untitled')}' in {service.replace('_', ' ').title()}",
+                f"**URL:** {doc.get('url', 'N/A')}",
+                f"**Owner:** {doc.get('owner', 'Unknown')}",
+                f"**Created:** {doc.get('created_time', 'Unknown')}",
+                f"**Modified:** {doc.get('modified_time', 'Unknown')}"
+            ]
+            
+            if content:
+                message_parts.extend([
+                    f"\n**Content Preview:**",
+                    content_preview
+                ])
+                if len(content) > 1000:
+                    message_parts.append("\n... (content truncated)")
+            else:
+                message_parts.append("\n**Content:** No content found or unable to extract.")
+
             return {
                 "status": "success",
                 "result": {
                     "document": doc,
-                    "content": content_result.get('content', '')
+                    "content": content,
+                    "content_preview": content_preview
                 },
-                "message": f"📖 Found document '{doc.get('title', 'Untitled')}' in {service.replace('_', ' ').title()}",
+                "message": "\n".join(message_parts),
                 "collaboration_data": {
                     "document_url": doc.get("url", ""),
-                    "document_id": doc_id
+                    "document_id": doc_id,
+                    "content": content
                 }
             }
 

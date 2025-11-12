@@ -437,6 +437,13 @@ class EnhancedEmailAgent:
                     "gmail_message_id": result.gmail_message_id,
                     "gmail_thread_id": result.gmail_thread_id,
                     "sent_at": result.sent_at.isoformat() if result.sent_at else None
+                },
+                "collaboration_data": {
+                    "draft_info": {
+                        "to": draft.to,
+                        "subject": draft.subject,
+                        "body": draft.body
+                    }
                 }
             }
         else:
